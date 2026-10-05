@@ -17,11 +17,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import components
+import gc
+
+from backend import components, storage
+from scripts import doctor
 
 
 class InventoryShapeTests(unittest.TestCase):
     def setUp(self) -> None:
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.addCleanup(gc.collect)
+        root = Path(workspace.name)
+        for name, path in {
+            "DATA_DIR": root,
+            "DB_PATH": root / "whisper.sqlite3",
+            "TEMP_DIR": root / "temp",
+            "DICTATIONS_DIR": root / "dictations",
+            "COOKIES_DIR": root / "cookies",
+        }.items():
+            patcher = patch.object(storage, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        doctor.ensure_storage()
         components.invalidate()
         self.inventory = components.inventory(refresh=True)
 

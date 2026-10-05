@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 
@@ -268,10 +269,23 @@ def check_diarization() -> None:
         line(NO, "Pyannote не активирован", "проверьте Настройки → Спикеры")
 
 
+def ensure_storage() -> None:
+    """Create defaults on first install without resetting jobs in an existing DB."""
+    from backend import storage
+
+    with closing(storage.connect()) as db:
+        initialized = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'"
+        ).fetchone()
+    if not initialized:
+        storage.init_db()
+
+
 def main() -> int:
     print("Проверка установки локального Whisper", flush=True)
     print(f"Каталог: {ROOT}", flush=True)
 
+    ensure_storage()
     missing_required, missing_optional = check_components()
     check_diarization()
     works = check_speed()
