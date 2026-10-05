@@ -105,6 +105,8 @@ class InventoryShapeTests(unittest.TestCase):
             ), patch.object(
                 components, "_pyannote_component", side_effect=lambda: fake[1]
             ), patch.object(
+                components, "_nemotron_component", side_effect=lambda: fake[0]
+            ), patch.object(
                 components, "WHISPER_MODELS", ()
             ):
                 result = components.inventory(refresh=True)
