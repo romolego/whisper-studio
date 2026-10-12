@@ -21,6 +21,7 @@ from . import (
     longform,
     media,
     paragraphs,
+    runtime,
     storage,
 )
 from .cancellation import CancelledJob
@@ -33,6 +34,10 @@ ENGLISH_MODEL_DIR = MODELS_DIR / "turbo"
 RUSSIAN_MODEL_DIR = MODELS_DIR / "turbo-russian"
 RUSSIAN_REPO = "coriollon/whisper-large-v3-turbo-russian"
 ENGLISH_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+MODEL_REVISIONS = {
+    ENGLISH_REPO: "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    RUSSIAN_REPO: "1158957eaa77976d79e1d2e6083a55826931c37f",
+}
 
 _model_lock = threading.Lock()
 
@@ -96,6 +101,7 @@ def prepare_model_files(progress: Callable[[str], None] | None = None) -> None:
             try:
                 snapshot_download(
                     repo_id=repo_id,
+                    revision=MODEL_REVISIONS[repo_id],
                     allow_patterns=patterns,
                     local_dir=str(local_dir),
                     max_workers=1,
@@ -224,16 +230,22 @@ def _load_model(language: str) -> tuple[WhisperModel, str]:
         if not (model_path / "model.bin").exists():
             prepare_model_files()
 
-        try:
-            model = WhisperModel(
-                str(model_path),
-                device="cuda",
-                compute_type="int8_float32",
-                cpu_threads=cpu_threads(),
-                num_workers=1,
-            )
-            device = "cuda"
-        except Exception:
+        preferred = runtime.preferred_device()
+        model = None
+        if preferred != "cpu":
+            try:
+                model = WhisperModel(
+                    str(model_path),
+                    device="cuda",
+                    compute_type="int8_float32",
+                    cpu_threads=cpu_threads(),
+                    num_workers=1,
+                )
+                device = "cuda"
+            except Exception:
+                if preferred == "cuda":
+                    raise
+        if model is None:
             model = WhisperModel(
                 str(model_path),
                 device="cpu",

@@ -1,4 +1,9 @@
 ﻿param(
+    [ValidateSet("auto", "cpu", "cuda")]
+    [string]$Device = "auto",
+    [ValidateSet("auto", "cu126", "cu128")]
+    [string]$CudaVariant = "auto",
+    [switch]$Plan,
     [switch]$SkipDiarization,
     [switch]$SkipFrontend
 )
@@ -37,6 +42,48 @@ $diarizationWheels = Join-Path $projectRoot "bundle\wheels-diarization"
 $script:failures = @()
 $script:warnings = @()
 
+. (Join-Path $PSScriptRoot "install_helpers.ps1")
+$hasNvidia = $false
+$nvidia = Get-Command "nvidia-smi" -ErrorAction SilentlyContinue
+if ($nvidia) {
+    try {
+        $gpuNames = & $nvidia.Source --query-gpu=name --format=csv,noheader 2>$null
+        $hasNvidia = ($LASTEXITCODE -eq 0) -and [bool]$gpuNames
+    }
+    catch { $hasNvidia = $false }
+}
+$installDevice = Get-InstallDevice $Device $hasNvidia
+if ($CudaVariant -eq "auto") {
+    $CudaVariant = "cu126"
+    if ($hasNvidia) {
+        try {
+            $capabilities = & $nvidia.Source --query-gpu=compute_cap --format=csv,noheader 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($capability in $capabilities) {
+                    if ([double]::Parse($capability, [Globalization.CultureInfo]::InvariantCulture) -ge 10) {
+                        $CudaVariant = "cu128"
+                    }
+                }
+            }
+        }
+        catch { }
+    }
+}
+$selectedDiarizationVenv = $diarizationVenv
+if ($installDevice -eq "cuda") { $selectedDiarizationVenv = $diarizationGpuVenv }
+$selectedDiarizationPython = Join-Path $selectedDiarizationVenv "Scripts\python.exe"
+if ($Plan) {
+    [PSCustomObject]@{
+        requested_device = $Device
+        selected_device = $installDevice
+        torch_variant = $(if ($installDevice -eq "cuda") { $CudaVariant } else { "cpu" })
+        diarization_environment = $selectedDiarizationVenv
+        install_cuda_libraries = ($installDevice -eq "cuda")
+        skip_diarization = [bool]$SkipDiarization
+    } | ConvertTo-Json
+    exit 0
+}
+
 function Write-Step([string]$text) {
     Write-Host ""
     Write-Host "== $text" -ForegroundColor Cyan
@@ -67,6 +114,13 @@ function Update-PathFromRegistry {
 
 function Test-Program([string]$name) {
     $command = Get-Command $name -ErrorAction SilentlyContinue
+    if ($name -eq "node" -and $command) {
+        try {
+            $version = & $command.Source -p "process.versions.node" 2>$null
+            return ($LASTEXITCODE -eq 0) -and ([version]$version -ge [version]"22.13.0")
+        }
+        catch { return $false }
+    }
     return [bool]$command
 }
 
@@ -78,7 +132,7 @@ function Invoke-External {
     )
     # Start-Process с -Wait, а не оператор вызова: нужен код возврата и
     # гарантия, что вывод дочернего процесса дошёл до консоли целиком.
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments `
+    $process = Start-Process -FilePath $FilePath -ArgumentList @($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) `
         -WorkingDirectory $WorkingDirectory -NoNewWindow -Wait -PassThru
     return $process.ExitCode
 }
@@ -177,7 +231,7 @@ function New-PythonVenv([hashtable]$basePython, [string]$target) {
 }
 
 function Invoke-Pip([string]$python, [string[]]$arguments) {
-    $full = @("-m", "pip") + $arguments
+    $full = @("-m", "pip", "--timeout", "120", "--retries", "5") + $arguments
     return (Invoke-External -FilePath $python -Arguments $full)
 }
 
@@ -219,6 +273,7 @@ function Install-Requirements {
 
 Write-Host "Установка локального Whisper" -ForegroundColor White
 Write-Host "Каталог: $projectRoot"
+Write-Host "Устройство установки: $installDevice ($Device)"
 
 # --- программы --------------------------------------------------------------
 
@@ -269,91 +324,55 @@ else {
     Write-Fail "Не удалось установить пакеты из requirements.txt"
 }
 
+# --- библиотеки CUDA для Whisper --------------------------------------------
+
+if ($installDevice -eq "cuda") {
+    Write-Step "Ускорение Whisper на NVIDIA"
+    $code = Invoke-External $venvPython @("-m", "scripts.install_cuda", "--variant", $CudaVariant)
+    if ($code -eq 0) { Write-Ok "Библиотеки CUDA/cuDNN на месте" }
+    else { Write-Fail "Не удалось восстановить библиотеки CUDA/cuDNN" }
+}
+
 # --- среда разметки спикеров ------------------------------------------------
 
-Write-Step "Среда для разметки спикеров"
-
+Write-Step "Среда для разметки спикеров: $installDevice"
 if ($SkipDiarization) {
     Write-Note "Пропущено по ключу -SkipDiarization"
 }
-elseif (Test-Path -LiteralPath (Join-Path $diarizationGpuVenv "Scripts\python.exe")) {
-    Write-Ok "Уже есть среда с видеокартой, процессорная не нужна"
-    # Среда с видеокартой настраивалась руками, но пакеты из
-    # requirements-diarization.txt доставляются и в неё: так в уже работающую
-    # установку приезжает Nemotron. torch в этом списке нет, поэтому
-    # CUDA-сборка остаётся нетронутой.
-    $code = Install-Requirements -Python (Join-Path $diarizationGpuVenv "Scripts\python.exe") `
-        -Wheels $diarizationWheels -Title "пакеты разметки" `
-        -Targets @(
-            "--requirement",
-            (Join-Path $projectRoot "requirements-diarization.txt")
-        )
-    if ($code -eq 0) {
-        Write-Ok "Pyannote и Nemotron на месте"
-    }
-    else {
-        Write-Fail "Не удалось доставить пакеты разметки в среду с видеокартой"
-    }
-}
 else {
     $created = $true
-    if (-not (Test-Path -LiteralPath $diarizationPython)) {
-        $created = New-PythonVenv $basePython $diarizationVenv
+    if (-not (Test-Path -LiteralPath $selectedDiarizationPython)) {
+        $created = New-PythonVenv $basePython $selectedDiarizationVenv
     }
     if (-not $created) {
-        Write-Fail "Не удалось создать .venv_diarization_cpu"
+        Write-Fail "Не удалось создать среду разметки спикеров"
     }
     else {
-        $wheelsReady = (Test-Path -LiteralPath $diarizationWheels) -and
-            @(Get-ChildItem -LiteralPath $diarizationWheels -Filter "*.whl" `
-                -ErrorAction SilentlyContinue).Count -gt 0
-        if (-not $wheelsReady) {
-            $null = Invoke-Pip $diarizationPython @("install", "--upgrade", "pip", "--quiet")
+        $null = Invoke-Pip $selectedDiarizationPython @("install", "--upgrade", "pip", "--quiet")
+        $torchVariant = "cpu"
+        $wheels = $diarizationWheels
+        if ($installDevice -eq "cuda") {
+            $torchVariant = $CudaVariant
+            # bundle/wheels-diarization contains CPU wheels; never use them for GPU.
+            $wheels = Join-Path $projectRoot "bundle\wheels-diarization-gpu"
         }
-
-        # torch ставится отдельной командой, до pyannote: иначе pyannote
-        # притянул бы его как обычную зависимость, и на машине с видеокартой
-        # это могла бы оказаться CUDA-сборка на 2.5 ГБ вместо процессорной на
-        # 250 МБ. Сначала нужный torch, потом всё остальное поверх него.
-        Write-Host "   ... torch без CUDA, это самая долгая часть" -ForegroundColor DarkGray
-        if ($wheelsReady) {
-            $torchCode = Invoke-Pip $diarizationPython @(
-                "install", "--no-index", "--find-links", $diarizationWheels,
-                "torch", "torchaudio"
+        $torchCode = Install-Requirements -Python $selectedDiarizationPython -Wheels $wheels `
+            -Title "PyTorch ($torchVariant)" -Targets @(
+                "--index-url", "https://download.pytorch.org/whl/$torchVariant",
+                "torch==2.11.0+$torchVariant", "torchaudio==2.11.0+$torchVariant"
             )
-        }
-        else {
-            $torchCode = Invoke-Pip $diarizationPython @(
-                "install", "--index-url", "https://download.pytorch.org/whl/cpu",
-                "torch==2.11.0", "torchaudio==2.11.0"
-            )
-            if ($torchCode -ne 0) {
-                # Точной версии может не оказаться под этот Python — берём любую
-                # свежую процессорную сборку, pyannote требует не ниже 2.8.
-                Write-Host "   ... версия 2.11.0 недоступна, ставится текущая" -ForegroundColor DarkGray
-                $torchCode = Invoke-Pip $diarizationPython @(
-                    "install", "--index-url", "https://download.pytorch.org/whl/cpu",
-                    "torch", "torchaudio"
-                )
-            }
-        }
-
         if ($torchCode -ne 0) {
-            Write-Fail "Не удалось установить torch — разметки спикеров не будет"
+            Write-Fail "Не удалось установить PyTorch ($torchVariant)"
         }
         else {
-            $code = Install-Requirements -Python $diarizationPython `
-                -Wheels $diarizationWheels -Title "Pyannote" `
-                -Targets @(
-                    "--requirement",
-                    (Join-Path $projectRoot "requirements-diarization.txt")
+            $code = Install-Requirements -Python $selectedDiarizationPython -Wheels $wheels `
+                -Title "Pyannote и Nemotron" -Targets @(
+                    "torch==2.11.0+$torchVariant", "torchaudio==2.11.0+$torchVariant",
+                    "--extra-index-url", "https://download.pytorch.org/whl/$torchVariant",
+                    "--requirement", (Join-Path $projectRoot "requirements-diarization.txt")
                 )
-            if ($code -eq 0) {
-                Write-Ok "Pyannote и Nemotron установлены"
-            }
-            else {
-                Write-Fail "Не удалось установить Pyannote и Nemotron"
-            }
+            if ($code -eq 0) { Write-Ok "Pyannote и Nemotron установлены" }
+            else { Write-Fail "Не удалось установить Pyannote и Nemotron" }
         }
     }
 }
@@ -382,33 +401,26 @@ else {
 # Nemotron открытый, токен ему не нужен, поэтому модель просто скачивается.
 $nemotronCache = Join-Path $hubCache "models--nvidia--Nemotron-3-Diarization"
 $bundledNemotron = Join-Path $bundleCache "models--nvidia--Nemotron-3-Diarization"
-$nemotronPython = Join-Path $diarizationGpuVenv "Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $nemotronPython)) {
-    $nemotronPython = $diarizationPython
-}
+$nemotronPython = $selectedDiarizationPython
 
-if (Test-Path -LiteralPath (Join-Path $nemotronCache "snapshots")) {
-    Write-Ok "Модель Nemotron 3 уже в кеше Hugging Face"
+if (Test-Path -LiteralPath $bundledNemotron) {
+    if (-not (Test-Path -LiteralPath $nemotronCache)) {
+        New-Item -ItemType Directory -Force -Path $hubCache | Out-Null
+        Copy-Item -LiteralPath $bundledNemotron -Destination $hubCache -Recurse -Force
+    }
 }
-elseif (Test-Path -LiteralPath $bundledNemotron) {
-    New-Item -ItemType Directory -Force -Path $hubCache | Out-Null
-    Copy-Item -LiteralPath $bundledNemotron -Destination $hubCache -Recurse -Force
-    Write-Ok "Модель Nemotron 3 взята из архива"
+if ($SkipDiarization) {
+    Write-Note "Загрузка Nemotron пропущена по -SkipDiarization"
 }
-elseif ($SkipDiarization -or -not (Test-Path -LiteralPath $nemotronPython)) {
-    Write-Note "Модели Nemotron 3 нет: не установлена среда разметки спикеров"
+elseif (-not (Test-Path -LiteralPath $nemotronPython)) {
+    Write-Fail "Nemotron не установлен: нет среды разметки спикеров"
 }
 else {
-    Write-Host "   ... скачивается Nemotron 3, около 400 МБ" -ForegroundColor DarkGray
-    # Путь в кавычках: Start-Process склеивает аргументы через пробел.
-    $nemotronWorker = '"' + (Join-Path $projectRoot "backend\nemotron_worker.py") + '"'
+    Write-Host "   ... проверяется и докачивается закреплённая модель Nemotron, около 400 МБ" -ForegroundColor DarkGray
+    $nemotronWorker = Join-Path $projectRoot "backend\nemotron_worker.py"
     $code = Invoke-External -FilePath $nemotronPython -Arguments @($nemotronWorker, "--download")
-    if ($code -eq 0) {
-        Write-Ok "Модель Nemotron 3 скачана"
-    }
-    else {
-        Write-Note "Nemotron 3 не скачался. Настройки -> Спикеры -> «Скачать модель»"
-    }
+    if ($code -eq 0) { Write-Ok "Модель Nemotron 3 на месте" }
+    else { Write-Fail "Nemotron не скачался. Повторите установку или скачайте модель в Настройки -> Спикеры" }
 }
 
 # --- модели распознавания ---------------------------------------------------
@@ -478,6 +490,19 @@ else {
             }
         }
     }
+}
+
+# --- устройство и проверка вычислений ---------------------------------------
+
+if (Test-Path -LiteralPath $venvPython) {
+    $code = Invoke-External $venvPython @("-m", "scripts.configure_runtime", "--device", $Device)
+    if ($code -ne 0) { Write-Fail "Не удалось сохранить выбор устройства" }
+    $checkArguments = @("-m", "scripts.check_runtime", "--device", $installDevice)
+    if (-not $SkipDiarization) {
+        $checkArguments += @("--diarization-python", $selectedDiarizationPython)
+    }
+    $code = Invoke-External $venvPython $checkArguments
+    if ($code -ne 0) { Write-Fail "Вычисления на $installDevice не прошли проверку" }
 }
 
 # --- проверка ---------------------------------------------------------------

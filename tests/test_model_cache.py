@@ -27,6 +27,9 @@ class _StubModel:
 
 class ModelCacheTests(unittest.TestCase):
     def setUp(self) -> None:
+        preparer = patch.object(transcriber, "prepare_model_files")
+        preparer.start()
+        self.addCleanup(preparer.stop)
         transcriber.release_models()
         self.addCleanup(transcriber.release_models)
 

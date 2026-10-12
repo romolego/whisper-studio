@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import cancellation, storage
+from . import cancellation, runtime, storage
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,7 +72,8 @@ def _venv_runtime(venv: Path) -> tuple[Path, Path] | None:
 
 def _external_runtime() -> tuple[Path, Path] | None:
     """Интерпретатор и признак установленного pyannote, GPU-среда в приоритете."""
-    for venv in (GPU_VENV, CPU_VENV, LEGACY_VENV):
+    environments = (CPU_VENV, GPU_VENV) if runtime.preferred_device() == "cpu" else (GPU_VENV, CPU_VENV)
+    for venv in (*environments, LEGACY_VENV):
         found = _venv_runtime(venv)
         if found is not None:
             return found
@@ -87,7 +88,8 @@ def _nemotron_runtime() -> Path | None:
     поддержка появилась в исходниках раньше, чем в выпуске на PyPI. librosa
     нужна извлекателю признаков модели, без неё worker падает при загрузке.
     """
-    for venv in (GPU_VENV, CPU_VENV):
+    environments = (CPU_VENV, GPU_VENV) if runtime.preferred_device() == "cpu" else (GPU_VENV, CPU_VENV)
+    for venv in environments:
         python_path = venv / "Scripts" / "python.exe"
         packages = venv / "Lib" / "site-packages"
         if (

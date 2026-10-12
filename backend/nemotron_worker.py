@@ -36,6 +36,7 @@ from worker_device import pick_device
 
 
 MODEL_ID = "nvidia/Nemotron-3-Diarization"
+MODEL_REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
 # В репозитории модели лежат ещё .nemo для NeMo, GGUF для C++ и демо-ролики —
 # ещё 300 МБ, которые этому worker не нужны.
 MODEL_FILES = ["config.json", "processor_config.json", "model.safetensors"]
@@ -173,8 +174,8 @@ def _smooth(
 
 
 def diarize(audio: np.ndarray, device: torch.device) -> list[dict]:
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = AutoModelForAudioFrameClassification.from_pretrained(MODEL_ID)
+    processor = AutoProcessor.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
+    model = AutoModelForAudioFrameClassification.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
     model.to(device)
     model.eval()
 
@@ -218,7 +219,7 @@ def diarize(audio: np.ndarray, device: torch.device) -> list[dict]:
 def download() -> int:
     from huggingface_hub import snapshot_download
 
-    print(snapshot_download(MODEL_ID, allow_patterns=MODEL_FILES))
+    print(snapshot_download(MODEL_ID, revision=MODEL_REVISION, allow_patterns=MODEL_FILES))
     return 0
 
 
