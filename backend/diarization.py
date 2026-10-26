@@ -229,8 +229,8 @@ def engine_available(engine: str) -> bool:
 
 
 def default_engine() -> str:
-    value = storage.get_settings().get("diarization_engine", "pyannote")
-    return value if value in ENGINES else "pyannote"
+    value = storage.get_settings().get("diarization_engine", "nemotron")
+    return value if value in ENGINES else "nemotron"
 
 
 def resolve_engine(requested: str | None) -> str:

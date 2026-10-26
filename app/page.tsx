@@ -93,7 +93,7 @@ type Settings = {
 
 // Чем размечать спикеров. Pyannote — прежний движок, Nemotron 3 — модель
 // NVIDIA: до восьми голосов, перебивания, втрое меньше видеопамяти.
-const diarizationEngines = ["pyannote", "nemotron"] as const;
+const diarizationEngines = ["nemotron", "pyannote"] as const;
 type DiarizationEngine = (typeof diarizationEngines)[number];
 const diarizationEngineLabels: Record<DiarizationEngine, string> = {
   pyannote: "Pyannote",
@@ -477,7 +477,7 @@ const initialSettings: Settings = {
   telegram_autostart: "on",
   youtube_cookies: "off",
   diarization_device: "auto",
-  diarization_engine: "pyannote",
+  diarization_engine: "nemotron",
   theme: "light",
   // Пустые строки, а не «E:\whisper\...»: настоящие пути приходят с сервера
   // первым же запросом, а зашитый здесь путь был бы неверным на любой другой
@@ -1492,7 +1492,7 @@ export default function Home() {
     useState<JobOptions["quality"]>("accurate");
   const [urlDiarization, setUrlDiarization] = useState(false);
   const [urlDiarizationEngine, setUrlDiarizationEngine] =
-    useState<DiarizationEngine>("pyannote");
+    useState<DiarizationEngine>("nemotron");
   const [urlTranscribe, setUrlTranscribe] = useState(true);
   const [urlProbing, setUrlProbing] = useState(false);
   const [urlStarting, setUrlStarting] = useState(false);
@@ -1506,14 +1506,14 @@ export default function Home() {
     useState<JobOptions["quality"]>("accurate");
   const [rerunDiarization, setRerunDiarization] = useState(false);
   const [rerunDiarizationEngine, setRerunDiarizationEngine] =
-    useState<DiarizationEngine>("pyannote");
+    useState<DiarizationEngine>("nemotron");
   // Повторная разметка готового файла: текст остаётся, меняются спикеры.
   const [rediarizeJobId, setRediarizeJobId] = useState("");
   const [rediarizeEngine, setRediarizeEngine] =
-    useState<DiarizationEngine>("pyannote");
+    useState<DiarizationEngine>("nemotron");
   const [rediarizeStarting, setRediarizeStarting] = useState(false);
   const [missingSpeakersEngine, setMissingSpeakersEngine] =
-    useState<DiarizationEngine>("pyannote");
+    useState<DiarizationEngine>("nemotron");
   // Образец голоса спикера: какой играет и какой ещё готовится.
   const [speakerSampleKey, setSpeakerSampleKey] = useState("");
   const [speakerSampleLoadingKey, setSpeakerSampleLoadingKey] = useState("");
@@ -1532,7 +1532,7 @@ export default function Home() {
     useState<Settings["default_view_speakers"]>("off");
   const [diarization, setDiarization] = useState(false);
   const [diarizationEngine, setDiarizationEngine] =
-    useState<DiarizationEngine>("pyannote");
+    useState<DiarizationEngine>("nemotron");
   const [diarizationStatus, setDiarizationStatus] =
     useState<DiarizationStatus | null>(null);
   const [diarizationToken, setDiarizationToken] = useState("");
@@ -1584,6 +1584,13 @@ export default function Home() {
   );
   const [editingSpeakerKey, setEditingSpeakerKey] = useState("");
   const [speakerNameDraft, setSpeakerNameDraft] = useState("");
+  const speakerEditRef = useRef<{
+    speaker: SpeakerEntry;
+    projectId: string;
+    name: string;
+  } | null>(null);
+  const speakerDraftsRef = useRef(new Map<string, string>());
+  const speakerSavesRef = useRef(new Map<string, Promise<void>>());
   // id задач, по которым запрос на остановку уже отправлен, но ответ ещё не
   // пришёл: нужно, чтобы кнопка не позволяла нажать дважды.
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
@@ -1632,8 +1639,6 @@ export default function Home() {
       setProjectFolderDraft("");
       setEditingFolderId("");
       setFolderNameDraft("");
-      setEditingSpeakerKey("");
-      setSpeakerNameDraft("");
       setEditingHistoryId("");
       setHistoryTextDraft("");
     };
@@ -1644,8 +1649,7 @@ export default function Home() {
       setProjectFolderDraft("");
       setEditingFolderId("");
       setFolderNameDraft("");
-      setEditingSpeakerKey("");
-      setSpeakerNameDraft("");
+      cancelSpeakerEdit();
       setEditingHistoryId("");
       setHistoryTextDraft("");
       setCreateOpen(false);
@@ -1955,6 +1959,7 @@ export default function Home() {
     [projectSpeakers],
   );
   const speakerFilterValue =
+    viewSpeakers === "on" &&
     projectSpeakers.length > 0 &&
     selectedSpeakerKeyList.length < projectSpeakers.length
       ? selectedSpeakerKeyList.length
@@ -3677,15 +3682,7 @@ export default function Home() {
 
   function openRediarize(job: Job) {
     setRediarizeJobId(job.id);
-    // Если файл уже размечен одним движком, по умолчанию предлагается другой:
-    // повторная разметка тем же движком даст тот же результат.
-    const current = job.options.diarization
-      ? job.options.diarization_engine || "pyannote"
-      : null;
-    const other = diarizationEngines.find(
-      (engine) => engine !== current && engineReady(diarizationStatus, engine),
-    );
-    setRediarizeEngine(other || current || settings.diarization_engine);
+    setRediarizeEngine(settings.diarization_engine);
   }
 
   async function rediarizeCompletedJob(event: FormEvent) {
@@ -4003,13 +4000,13 @@ export default function Home() {
     });
   }
 
-  function variantQuery() {
+  function variantQuery(selectedOnly = false) {
     const query = new URLSearchParams({
       timestamps: viewTimestamps,
       formatting: viewFormatting,
-      speakers: viewSpeakers,
+      speakers: "on",
     });
-    if (speakerFilterValue) query.set("speaker_keys", speakerFilterValue);
+    if (selectedOnly && speakerFilterValue) query.set("speaker_keys", speakerFilterValue);
     return query.toString();
   }
 
@@ -4100,39 +4097,62 @@ export default function Home() {
   }
 
   function startSpeakerEdit(speaker: SpeakerEntry) {
+    // Blur обычно уже сохранил предыдущее поле; этот вызов покрывает
+    // переходы, при которых браузер не успел передать фокус.
+    if (speakerEditRef.current) saveSpeakerName(speakerEditRef.current.speaker);
+    const name = speakerDraftsRef.current.get(speaker.key) ?? (speaker.custom_name || speaker.name);
+    speakerEditRef.current = { speaker, projectId: activeProjectId, name };
     setEditingSpeakerKey(speaker.key);
-    setSpeakerNameDraft(speaker.custom_name || speaker.name);
+    setSpeakerNameDraft(name);
   }
 
   function cancelSpeakerEdit() {
+    if (speakerEditRef.current) {
+      speakerDraftsRef.current.delete(speakerEditRef.current.speaker.key);
+    }
+    speakerEditRef.current = null;
     setEditingSpeakerKey("");
     setSpeakerNameDraft("");
   }
 
-  async function saveSpeakerName(speaker: SpeakerEntry) {
-    const response = await fetch(
-      `${API}/projects/${activeProjectId}/speakers/${encodeURIComponent(speaker.job_id)}/${encodeURIComponent(speaker.speaker_id)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: speakerNameDraft.trim() }),
-      },
-    );
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
-      return;
-    }
-    const updated = (await response.json()) as SpeakerEntry;
-    setProjectSpeakers((current) =>
-      current.map((item) => (item.key === updated.key ? updated : item)),
-    );
-    setViewSpeakers("on");
-    cancelSpeakerEdit();
-    setNotice(
-      updated.custom_name
-        ? `Имя «${updated.name}» сохранено`
-        : "Вернул стандартное имя спикера",
-    );
+  function saveSpeakerName(speaker: SpeakerEntry) {
+    const edit = speakerEditRef.current;
+    if (!edit || edit.speaker.key !== speaker.key) return;
+    const name = edit.name.trim();
+    speakerDraftsRef.current.set(speaker.key, edit.name);
+    speakerEditRef.current = null;
+    setEditingSpeakerKey((current) => current === speaker.key ? "" : current);
+    // Снимок имени и проекта не зависит от уже открытого следующего поля.
+    // Последовательная запись одного спикера не даёт старому ответу затереть новый.
+    const previous = speakerSavesRef.current.get(speaker.key) ?? Promise.resolve();
+    const saving = previous.then(async () => {
+      try {
+        const response = await fetch(
+          `${API}/projects/${edit.projectId}/speakers/${encodeURIComponent(speaker.job_id)}/${encodeURIComponent(speaker.speaker_id)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          },
+        );
+        if (!response.ok) throw new Error(await errorMessage(response));
+        const updated = (await response.json()) as SpeakerEntry;
+        setProjectSpeakers((current) =>
+          current.map((item) => (item.key === updated.key ? updated : item)),
+        );
+        if (speakerDraftsRef.current.get(speaker.key) === edit.name) {
+          speakerDraftsRef.current.delete(speaker.key);
+        }
+      } catch (error) {
+        setNotice(`Не удалось сохранить имя «${name}»: ${error instanceof Error ? error.message : "ошибка сети"}. Введённое имя сохранено в поле переименования — повторите попытку.`);
+      }
+    });
+    speakerSavesRef.current.set(speaker.key, saving);
+    void saving.finally(() => {
+      if (speakerSavesRef.current.get(speaker.key) === saving) {
+        speakerSavesRef.current.delete(speaker.key);
+      }
+    });
   }
 
   async function activateDiarization() {
@@ -5066,13 +5086,13 @@ export default function Home() {
                       )
                     }
                   >
-                    ⧉ Копировать
+                    ⧉ Копировать полный текст
                   </button>
                   <a
                     className="download-primary"
                     href={`${API}/projects/${activeProject.id}/combined/${settings.default_export}?${variantQuery()}`}
                   >
-                    Скачать {settings.default_export.toUpperCase()}
+                    Скачать полный {settings.default_export.toUpperCase()}
                   </a>
                   <div className="format-links">
                     {exportKinds
@@ -5082,7 +5102,7 @@ export default function Home() {
                         key={kind}
                         href={`${API}/projects/${activeProject.id}/combined/${kind}?${variantQuery()}`}
                       >
-                        Скачать {kind.toUpperCase()}
+                        Скачать полный {kind.toUpperCase()}
                       </a>
                       ))}
                   </div>
@@ -5197,7 +5217,28 @@ export default function Home() {
                 )}
                 {viewSpeakers === "on" && projectSpeakers.length > 0 && (
                   <div className="speaker-manager">
+                    {speakerFilterValue && (
+                      <div className="speaker-filter-notice" role="status">
+                        <strong>Показана часть текста: спикеров {selectedSpeakerKeyList.length} из {projectSpeakers.length}.</strong>
+                        <span>Скрыты: {projectSpeakers.filter((speaker) => !selectedSpeakerKeys.has(speaker.key)).map((speaker) => speaker.name).join(", ")}.</span>
+                        <span>Кнопки выше скачивают полный текст со всеми спикерами.</span>
+                        <details>
+                          <summary>Экспорт выбранных спикеров</summary>
+                          <div className="format-links">
+                            {exportKinds.map((kind) => (
+                              <a
+                                key={kind}
+                                href={`${API}/projects/${activeProject.id}/combined/${kind}?${variantQuery(true)}`}
+                              >
+                                Только выбранные · {kind.toUpperCase()}
+                              </a>
+                            ))}
+                          </div>
+                        </details>
+                      </div>
+                    )}
                     <div className="speaker-manager-head">
+                      <span>Фильтр просмотра · выбрано {selectedSpeakerKeyList.length} из {projectSpeakers.length}</span>
                       <div className="speaker-manager-actions">
                         <button
                           type="button"
@@ -5233,17 +5274,30 @@ export default function Home() {
                           }
                         >
                           {editingSpeakerKey === speaker.key ? (
-                            <div className="speaker-name-editor">
+                            <div
+                              className="speaker-name-editor"
+                              onBlur={(event) => {
+                                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                                  saveSpeakerName(speaker);
+                                }
+                              }}
+                            >
                               <input
                                 value={speakerNameDraft}
                                 maxLength={80}
                                 autoFocus
                                 aria-label={`Имя для ${speaker.default_name}`}
-                                onChange={(event) =>
-                                  setSpeakerNameDraft(event.target.value)
-                                }
+                                onChange={(event) => {
+                                  const name = event.target.value;
+                                  if (speakerEditRef.current?.speaker.key === speaker.key) {
+                                    speakerEditRef.current.name = name;
+                                  }
+                                  speakerDraftsRef.current.set(speaker.key, name);
+                                  setSpeakerNameDraft(name);
+                                }}
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter") {
+                                    event.preventDefault();
                                     saveSpeakerName(speaker);
                                   }
                                   if (event.key === "Escape") {

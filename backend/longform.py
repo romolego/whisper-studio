@@ -45,9 +45,15 @@ WINDOW_THRESHOLD = 2700.0
 # Служебные файлы прогресса: по одному на задание, скрытой папкой в outputs.
 CHECKPOINT_DIR_NAME = ".checkpoints"
 
-# Старые окна с VAD уже потеряли часть звука. После смены профиля их нельзя
-# подмешивать к новым: незавершённое задание должно распознаваться заново.
+# Studio keeps its existing checkpoint profile. Telegram's speech decoding
+# must never resume an old checkpoint produced with synthetic hotwords.
 TRANSCRIPTION_PROFILE = "full-audio-v1"
+
+
+def profile(options: dict[str, Any]) -> str:
+    if options.get("model") == "large-v3":
+        return "large-v3-speech-turns-rubert-v3" if options.get("quality") == "accurate" else "large-v3-fast-v1"
+    return "telegram-speech-v1-no-prompt" if options.get("integration_source") == "telegram" else TRANSCRIPTION_PROFILE
 
 
 def plan(duration_seconds: float) -> list[tuple[float, float]]:
@@ -91,7 +97,7 @@ def signature(source: Path, options: dict[str, Any]) -> str:
         options.get("trim_start_seconds"),
         options.get("trim_end_seconds"),
     )
-    return f"{TRANSCRIPTION_PROFILE}|{file_part}|{relevant}"
+    return f"{profile(options)}|{file_part}|{relevant}"
 
 
 def _path(job: dict[str, Any]) -> Path:

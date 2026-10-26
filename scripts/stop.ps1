@@ -3,6 +3,7 @@ $ErrorActionPreference = "SilentlyContinue"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $runtimeDir = Join-Path $projectRoot "run"
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$dedicatedBotPython = Join-Path $projectRoot "vendor\telegram-python\WhisperTelegram.exe"
 
 function Stop-ProcessTree([int]$processId) {
     $children = Get-CimInstance Win32_Process |
@@ -86,7 +87,7 @@ foreach ($name in @("telegram", "frontend", "backend")) {
         }
         "telegram" {
             $process -and
-                $process.ExecutablePath -eq $pythonPath -and
+                $process.ExecutablePath -in @($pythonPath, $dedicatedBotPython) -and
                 $commandLine -match "telegram_bot"
         }
         default {

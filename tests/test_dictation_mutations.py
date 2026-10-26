@@ -229,8 +229,8 @@ def load_mutated(source: str) -> types.ModuleType:
     return module
 
 
-def run_named_tests(names: list[str]) -> dict[str, bool]:
-    """Возвращает {имя теста: прошёл ли}."""
+def run_named_tests(names: list[str]) -> dict[str, bool | None]:
+    """Возвращает результат; None означает пропуск из-за отсутствия модели."""
     import tests.test_dictation_quality as quality
     importlib.reload(quality)
     loader = unittest.TestLoader()
@@ -244,7 +244,10 @@ def run_named_tests(names: list[str]) -> dict[str, bool]:
                     suite.addTest(cls(name))
         with io.StringIO() as sink:
             result = unittest.TextTestRunner(verbosity=0, stream=sink).run(suite)
-        outcome[name] = result.wasSuccessful() and result.testsRun > 0
+        outcome[name] = (
+            None if result.testsRun > 0 and len(result.skipped) == result.testsRun
+            else result.wasSuccessful() and result.testsRun > 0
+        )
     return outcome
 
 
@@ -264,25 +267,31 @@ class MutationTests(unittest.TestCase):
                                 f"мутация не применилась: {label}")
             sys.modules["backend.dictation"] = load_mutated(mutated_source)
             outcome = run_named_tests(expected_failures)
-            caught = [name for name, passed in outcome.items() if not passed]
-            report.append((label, expected_failures, caught))
+            caught = [name for name, passed in outcome.items() if passed is False]
+            unavailable = all(passed is None for passed in outcome.values())
+            report.append((label, expected_failures, caught, unavailable))
 
         print()
         print("=" * 78)
         print("МУТАЦИОННАЯ ПРОВЕРКА: откатываем фикс -> тест обязан упасть")
         print("=" * 78)
         undetected = []
-        for label, expected, caught in report:
-            status = "ПОЙМАНО" if caught else "НЕ ПОЙМАНО"
+        unavailable_count = 0
+        for label, expected, caught, unavailable in report:
+            status = "ПРОПУЩЕНО: нет локального токенизатора" if unavailable else (
+                "ПОЙМАНО" if caught else "НЕ ПОЙМАНО"
+            )
             print(f"\n  {label}")
             print(f"    ожидали падения : {', '.join(expected)}")
             print(f"    упали           : {', '.join(caught) if caught else '— ничего —'}")
             print(f"    итог            : {status}")
-            if not caught:
+            if unavailable:
+                unavailable_count += 1
+            elif not caught:
                 undetected.append(label)
 
         print()
-        print(f"  покрыто мутаций: {len(CASES) - len(undetected)} из {len(CASES)}")
+        print(f"  покрыто мутаций: {len(CASES) - len(undetected) - unavailable_count} из {len(CASES)}; пропущено: {unavailable_count}")
         self.assertEqual([], undetected,
                          "эти дефекты можно вернуть, и тесты этого не заметят")
 

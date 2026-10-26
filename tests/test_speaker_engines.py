@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import unittest
+from unittest.mock import patch
 
 from backend import diarization, speaker_samples, storage, transcriber
 
@@ -108,11 +109,21 @@ class EngineChoiceTests(unittest.TestCase):
             "pyannote",
         )
 
-    def test_engine_setting_defaults_to_pyannote(self) -> None:
-        self.assertEqual(storage.DEFAULT_SETTINGS["diarization_engine"], "pyannote")
+    def test_engine_setting_defaults_to_nemotron(self) -> None:
+        self.assertEqual(storage.DEFAULT_SETTINGS["diarization_engine"], "nemotron")
         self.assertEqual(
             storage.SETTING_VALUES["diarization_engine"], {"pyannote", "nemotron"}
         )
+
+    def test_missing_or_invalid_engine_uses_nemotron_and_explicit_choice_is_kept(self) -> None:
+        for settings, expected in (
+            ({}, "nemotron"),
+            ({"diarization_engine": "invalid"}, "nemotron"),
+            ({"diarization_engine": "pyannote"}, "pyannote"),
+            ({"diarization_engine": "nemotron"}, "nemotron"),
+        ):
+            with patch.object(storage, "get_settings", return_value=settings):
+                self.assertEqual(diarization.resolve_engine(None), expected)
 
 
 if __name__ == "__main__":

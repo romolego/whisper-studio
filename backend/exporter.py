@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -123,6 +124,19 @@ def _filtered_segments(
     selected: SpeakerSelection,
 ) -> list[dict[str, Any]]:
     if selected is None:
+        return segments
+    available: set[str] = set()
+    for segment in segments:
+        words = segment.get("words") or []
+        values = (
+            [word.get("speaker") or segment.get("speaker") for word in words]
+            if words else [segment.get("speaker")]
+        )
+        available.update(
+            _speaker_key(job_id, value) for value in values if value is not None
+        )
+    # «Все спикеры» означает весь текст, включая слова без метки.
+    if available and available.issubset(selected):
         return segments
     filtered: list[dict[str, Any]] = []
     for segment in segments:
@@ -283,7 +297,39 @@ def _job_text(job: dict[str, Any]) -> str:
     if not path_value:
         return ""
     path = Path(path_value)
-    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    return path.read_text(encoding="utf-8-sig").strip() if path.exists() else ""
+
+
+def job_text(job: dict[str, Any], timestamps: str, formatting: str) -> str:
+    """Render one job independently of the options used for its first export."""
+    source = job["outputs"].get("json")
+    if source and Path(source).is_file():
+        payload = json.loads(Path(source).read_text(encoding="utf-8-sig"))
+        segments = payload.get("segments") or []
+        speakers = "on" if any(paragraphs.segment_speaker(item) is not None for item in segments) else "off"
+        return render_segments(segments, timestamps, formatting, speakers, job["id"],
+                               storage.list_speaker_aliases(job["session_id"]))
+    text = _job_text(job)
+    if timestamps == "none":
+        text = re.sub(r"(?m)^\s*\[\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\]\s*", "", text)
+    return _plain_text(text) if formatting == "plain" else text
+
+
+def create_job_text_export(job: dict[str, Any], kind: str,
+                           timestamps: str, formatting: str) -> Path:
+    """A requested view must not overwrite the original TXT/DOCX result."""
+    text = job_text(job, timestamps, formatting)
+    directory = storage.session_dir(job["session_id"]) / "outputs" / ".views" / job["id"]
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = storage.job_file_base(job)
+    target = directory / f"{stem}-{timestamps}-{formatting}.{kind}"
+    if kind == "docx":
+        write_docx(stem, text, target)
+    elif kind == "txt":
+        target.write_text(text + "\n", encoding="utf-8-sig")
+    else:
+        raise ValueError("Unsupported text export")
+    return target
 
 
 def combined_text(
@@ -620,6 +666,11 @@ def create_project_export(
         + ("без-пунктуации" if formatting == "plain" else "с-пунктуацией")
         + ("-по-спикерам" if speakers == "on" else "")
     )
+    if speaker_keys is not None:
+        selection_id = hashlib.sha256(
+            ",".join(sorted(speaker_keys)).encode("utf-8")
+        ).hexdigest()[:8]
+        variant += f"-только-выбранные-спикеры-{selection_id}"
     target = export_dir / f"{_project_file_name(project)} - {variant}.{kind}"
 
     if kind in {"txt", "md", "docx"}:
@@ -631,6 +682,8 @@ def create_project_export(
             speaker_keys,
             markup="markdown" if kind == "md" else "text",
         )
+        if speaker_keys is not None:
+            text = "ЧАСТИЧНАЯ РАСШИФРОВКА — только выбранные спикеры\n\n" + text
         if kind == "docx":
             write_docx(project["name"], text, target)
         elif kind == "md":

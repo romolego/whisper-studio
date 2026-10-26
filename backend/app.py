@@ -34,6 +34,7 @@ from . import (
     dictation,
     exporter,
     integrations,
+    idle_models,
     media,
     speaker_samples,
     storage,
@@ -43,6 +44,8 @@ from .transcriber import (
     _write_outputs as _write_dictation_outputs,
     diarize_existing_job,
     transcribe_job,
+    release_models,
+    loaded_model_keys,
 )
 
 
@@ -208,6 +211,9 @@ class UrlDownloadStart(BaseModel):
     folder_id: str | None = None
     transcription_language: Literal["auto", "ru", "en"] | None = None
     transcription_quality: Literal["fast", "accurate"] | None = None
+    transcription_model: Literal["studio", "large-v3"] = "studio"
+    transcription_timestamps: Literal["none", "segments", "words"] | None = None
+    transcription_formatting: Literal["formatted", "plain"] | None = None
     transcription_diarization: bool | None = None
     transcription_diarization_engine: DiarizationEngine | None = None
     # Ставить ли расшифровку сразу после загрузки. Выключается, когда нужно
@@ -224,6 +230,7 @@ class IntegrationProject(BaseModel):
 class JobRerun(BaseModel):
     language: Literal["auto", "ru", "en"]
     quality: Literal["fast", "accurate"]
+    model: Literal["studio", "large-v3"] | None = None
     diarization: bool = False
     diarization_engine: DiarizationEngine | None = None
 
@@ -487,13 +494,17 @@ def _still_queued(task_kind: str, task_id: str) -> bool:
     return storage.get_job(task_id)["status"] == "queued"
 
 
+MODEL_CACHE = idle_models.IdleModels(release_models, seconds=60)
+
+
 def _run_task(task_kind: str, task_id: str) -> None:
-    if task_kind == "dictation":
-        dictation.transcribe_dictation_fragment(task_id)
-    elif task_kind == "diarization":
-        diarize_existing_job(task_id)
-    else:
-        transcribe_job(task_id)
+    with MODEL_CACHE.activity():
+        if task_kind == "dictation":
+            dictation.transcribe_dictation_fragment(task_id)
+        elif task_kind == "diarization":
+            diarize_existing_job(task_id)
+        else:
+            transcribe_job(task_id)
 
 
 def _mark_task_failed(task_kind: str, task_id: str, error: Exception) -> None:
@@ -657,14 +668,18 @@ def _finalize_url_download(
         "quality": requested.get(
             "quality", current_settings["default_quality"]
         ),
-        "timestamps": current_settings["default_timestamps"],
-        "formatting": current_settings["default_formatting"],
+        "timestamps": requested.get("timestamps") or current_settings["default_timestamps"],
+        "formatting": requested.get("formatting") or current_settings["default_formatting"],
+        "model": requested.get("model", "studio"),
         "audio_stream_index": int(audio_stream["index"]),
         "audio_track": audio_stream,
         "diarization": diarization_enabled,
         "source_url": download.get("url"),
         "source_provider": download.get("provider"),
     }
+    project_source = storage.get_session(project_id).get("integration")
+    if project_source in integrations.REGISTRY:
+        options["integration_source"] = project_source
     _with_engine(options, engine if diarization_enabled else None)
     job = storage.create_job(
         project_id,
@@ -826,6 +841,8 @@ def health() -> dict:
             name: thread.is_alive()
             for name, thread in worker_threads.items()
         },
+        "loaded_models": loaded_model_keys(),
+        "model_idle_seconds": MODEL_CACHE.seconds,
     }
 
 
@@ -1011,6 +1028,9 @@ def start_url_download(payload: UrlDownloadStart) -> dict:
         else current_settings["download_transcribe"] == "on"
     )
     transcription_options = {
+        "model": payload.transcription_model,
+        "timestamps": payload.transcription_timestamps,
+        "formatting": payload.transcription_formatting,
         "language": (
             payload.transcription_language
             or current_settings["default_language"]
@@ -2256,11 +2276,13 @@ async def enqueue_jobs(
     session_id: str = Form(...),
     language: Literal["auto", "ru", "en"] = Form("ru"),
     quality: Literal["fast", "accurate"] = Form("accurate"),
+    model: Literal["studio", "large-v3"] = Form("studio"),
     timestamps: Literal["none", "segments", "words"] = Form("segments"),
     formatting: Literal["formatted", "plain"] = Form("formatted"),
     diarization: bool = Form(False),
     diarization_engine: DiarizationEngine | None = Form(None),
     audio_stream_index: int | None = Form(None),
+    integration_request_id: str | None = Form(None),
     x_whisper_integration: str | None = Header(default=None),
 ) -> list[dict]:
     engine = _diarization_engine(diarization, diarization_engine)
@@ -2269,6 +2291,19 @@ async def enqueue_jobs(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Проект не найден") from exc
 
+    source = integrations.by_header(x_whisper_integration)
+    # A bot may restart after the upload was accepted but before it received
+    # the response. Replaying the same Telegram message must reuse the job.
+    if source and integration_request_id:
+        if len(files) != 1:
+            raise HTTPException(status_code=400, detail="request id requires one file")
+        for existing in storage.list_jobs(session_id):
+            opts = existing.get("options") or {}
+            if (opts.get("integration_source") == source.key and
+                    opts.get("integration_request_id") == integration_request_id):
+                for upload in files:
+                    await upload.close()
+                return [existing]
     created = []
     for upload in files:
         safe_name = Path(upload.filename or "audio").name
@@ -2324,12 +2359,16 @@ async def enqueue_jobs(
             "audio_track": track,
             "diarization": diarization,
         }
+        if model == "large-v3":
+            options["model"] = model
         _with_engine(options, engine)
         # Файл мог прийти не из браузера, а от интеграции: отметка нужна,
         # чтобы в настройках было видно, кто и сколько сюда прислал.
         source = integrations.by_header(x_whisper_integration)
         if source is not None:
             options["integration_source"] = source.key
+            if integration_request_id:
+                options["integration_request_id"] = integration_request_id
         job = storage.create_job(session_id, safe_name, destination, options)
         created.append(job)
         enqueue_project_job(job["id"])
@@ -2454,6 +2493,7 @@ def rerun_completed_job(job_id: str, payload: JobRerun) -> dict:
                 {
                     "language": payload.language,
                     "quality": payload.quality,
+                    **({"model": payload.model} if payload.model is not None else {}),
                     "diarization": payload.diarization,
                 },
                 engine,
@@ -2469,15 +2509,22 @@ def rerun_completed_job(job_id: str, payload: JobRerun) -> dict:
 
 
 @app.get("/api/jobs/{job_id}/text", response_class=PlainTextResponse)
-def job_text(job_id: str) -> str:
+def job_text(
+    job_id: str,
+    timestamps: Literal["none", "segments", "words"] | None = None,
+    formatting: Literal["formatted", "plain"] | None = None,
+) -> str:
     try:
         item = storage.get_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Задание не найдено") from exc
+    if timestamps is not None or formatting is not None:
+        return exporter.job_text(item, timestamps or item["options"].get("timestamps", "none"),
+                                 formatting or item["options"].get("formatting", "formatted"))
     path_value = item["outputs"].get("txt")
     if not path_value or not Path(path_value).exists():
         raise HTTPException(status_code=404, detail="Текст ещё не готов")
-    return Path(path_value).read_text(encoding="utf-8")
+    return Path(path_value).read_text(encoding="utf-8-sig")
 
 
 @app.post("/api/jobs/{job_id}/open-source")
@@ -2546,14 +2593,24 @@ def remove_job_audio(job_id: str) -> dict[str, bool]:
 
 
 @app.get("/api/jobs/{job_id}/download/{kind}")
-def download(job_id: str, kind: str):
+def download(
+    job_id: str,
+    kind: str,
+    timestamps: Literal["none", "segments", "words"] | None = None,
+    formatting: Literal["formatted", "plain"] | None = None,
+):
     if kind not in EXPORT_KINDS:
         raise HTTPException(status_code=404, detail="Неизвестный формат")
     try:
         item = storage.get_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Задание не найдено") from exc
-    path_value = item["outputs"].get(kind)
+    if kind in {"txt", "docx"} and (timestamps is not None or formatting is not None):
+        path_value = str(exporter.create_job_text_export(
+            item, kind, timestamps or item["options"].get("timestamps", "none"),
+            formatting or item["options"].get("formatting", "formatted")))
+    else:
+        path_value = item["outputs"].get(kind)
     if not path_value and kind == "docx":
         try:
             path_value = str(exporter.create_job_docx(item))

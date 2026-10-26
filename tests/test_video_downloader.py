@@ -30,9 +30,9 @@ class ProviderTests(unittest.TestCase):
     def test_vk_live_url_is_normalized(self) -> None:
         self.assertEqual(
             downloader.normalize_url(
-                "https://vkvideo.ru/live-211211142_456239216"
+                "https://vkvideo.ru/live-1_2"
             ),
-            "https://vkvideo.ru/video-211211142_456239216",
+            "https://vkvideo.ru/video-1_2",
         )
 
     def test_vk_audio_prefers_complete_combined_hls(self) -> None:
@@ -43,13 +43,36 @@ class ProviderTests(unittest.TestCase):
                 "worst[height>0]"
             ),
         )
-        # /best в конце — запасной путь для источников без отдельной
-        # аудиодорожки (записи Zoom). Для YouTube он не срабатывает: там
-        # bestaudio есть всегда.
-        self.assertEqual(
-            downloader._format_selector("audio", "youtube"),
-            "bestaudio[ext=m4a]/bestaudio/best",
-        )
+    def test_audio_prefers_original_language_and_keeps_fallbacks(self) -> None:
+        original = {
+            "format_id": "original", "format_note": "English original",
+            "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 64,
+        }
+        original_m4a = {**original, "format_id": "original-m4a", "ext": "m4a", "abr": 32}
+        dubbed = {
+            "format_id": "dubbed", "format_note": "Russian dubbed",
+            "ext": "m4a", "vcodec": "none", "acodec": "aac", "abr": 128,
+        }
+        combined = {
+            "format_id": "combined", "ext": "mp4",
+            "vcodec": "avc1", "acodec": "aac", "height": 360,
+        }
+        # yt-dlp получает форматы от худшего к лучшему. Оригинальная речь
+        # важнее более качественного дубляжа; без неё сохраняются запасные пути.
+        with downloader.yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+            select = ydl.build_format_selector(downloader._format_selector("audio", "youtube"))
+            for formats, expected in (
+                ([original, dubbed], "original"),
+                ([original_m4a, original, dubbed], "original-m4a"),
+                ([dubbed], "dubbed"),
+                ([combined], "combined"),
+            ):
+                with self.subTest(expected=expected):
+                    selected = list(select({
+                        "formats": formats, "has_merged_format": False,
+                        "incomplete_formats": False,
+                    }))
+                    self.assertEqual([item["format_id"] for item in selected], [expected])
 
     @patch.object(downloader.shutil, "which", return_value="ffmpeg.exe")
     @patch.object(downloader.subprocess, "run")
@@ -82,6 +105,9 @@ class ProviderTests(unittest.TestCase):
 class ProbeTests(unittest.TestCase):
     def setUp(self) -> None:
         downloader._PROBE_CACHE.clear()
+        preference = patch.object(downloader, "preferred_quality", return_value="audio")
+        preference.start()
+        self.addCleanup(preference.stop)
 
     def tearDown(self) -> None:
         downloader._PROBE_CACHE.clear()
@@ -165,16 +191,16 @@ class ProbeTests(unittest.TestCase):
         }
 
         first = downloader.probe_metadata(
-            "https://vkvideo.ru/live-211211142_456239216"
+            "https://vkvideo.ru/live-1_2"
         )
         first["title"] = "Изменено клиентом"
         second = downloader.probe_metadata(
-            "https://vkvideo.ru/video-211211142_456239216"
+            "https://vkvideo.ru/video-1_2"
         )
 
         self.assertEqual(second["title"], "VK эфир")
         instance.extract_info.assert_called_once_with(
-            "https://vkvideo.ru/video-211211142_456239216",
+            "https://vkvideo.ru/video-1_2",
             download=False,
         )
 
@@ -415,10 +441,10 @@ class ZoomProviderTests(unittest.TestCase):
         instance.extract_info.return_value = {"title": "Запись", "formats": []}
 
         with patch.object(downloader, "preferred_quality", return_value="audio"):
-            downloader.probe_metadata(self.REAL, "G*0f!27Y")
+            downloader.probe_metadata(self.REAL, "test!*code")
 
         options = youtube_dl.call_args[0][0]
-        self.assertEqual(options["videopassword"], "G*0f!27Y")
+        self.assertEqual(options["videopassword"], "test!*code")
 
     @patch.object(downloader.yt_dlp, "YoutubeDL")
     def test_no_passcode_means_no_option(self, youtube_dl: MagicMock) -> None:
@@ -507,7 +533,8 @@ class ZoomProviderTests(unittest.TestCase):
         self.assertEqual(result["qualities"][0]["height"], 1440)
         # Отдельной аудиодорожки у Zoom нет, поэтому «только звук» обязан
         # честно откатиться на самое лёгкое видео, а не остаться ни с чем.
-        chosen = downloader.resolve_auto_quality(result["qualities"])
+        with patch.object(downloader, "preferred_quality", return_value="audio"):
+            chosen = downloader.resolve_auto_quality(result["qualities"])
         self.assertIsNotNone(chosen)
 
     def test_progressive_download_keeps_only_sound(self) -> None:

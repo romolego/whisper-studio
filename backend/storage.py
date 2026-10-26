@@ -73,9 +73,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     # обходятся без этого — сервис перебирает клиентов API сам.
     "youtube_cookies": "off",
     "diarization_device": "auto",
-    # Чем размечать спикеров, если в запросе движок не назван. Pyannote —
-    # прежнее поведение: у кого Nemotron не скачан, ничего не меняется.
-    "diarization_engine": "pyannote",
+    # Новые задания используют Nemotron; явно сохранённый выбор сохраняется.
+    "diarization_engine": "nemotron",
     "theme": "light",
     "managed_storage_root": str(UPLOADS_DIR),
     "temporary_storage_root": str(TEMP_DIR),

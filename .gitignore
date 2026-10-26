@@ -41,6 +41,7 @@ tsconfig.tsbuildinfo
 /.wrangler/
 /outputs/
 /work/
+/.playwright-cli/
 
 # local Whisper runtime
 /.venv/
@@ -51,6 +52,23 @@ tsconfig.tsbuildinfo
 /models/
 /run/
 /vendor/
+/android/.gradle/
+/android/**/build/
+/android/local.properties
+
+# Optional local tools are not part of the public Studio backup.
+/telegram_bot/
+/android/
+/scripts/autostart.ps1
+/scripts/start-at-logon.ps1
+/scripts/install_telegram_model.py
+/scripts/install_telegram_python.py
+/scripts/prepare_telegram_audio.py
+/tests/test_telegram_*.py
+/tests/test_prepare_telegram_audio.py
+/Настроить Телеграм.bat
+/Запустить Whisper с ботом.bat
+/Подготовить аудио для Telegram.bat
 .dev-server*.log
 .dev-server.pid
 
@@ -92,7 +110,6 @@ cookies*.txt
 
 # Local development notes and tool state
 /.openai/*
-!/.openai/hosting.json
 /AUDIT_PROMPT_FOR_CLAUDE.md
 /CLAUDE_AUDIT_REPORT.md
 /!!!!*.txt

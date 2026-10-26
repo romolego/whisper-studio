@@ -21,7 +21,9 @@ from . import (
     longform,
     media,
     paragraphs,
+    punctuation,
     runtime,
+    speech_profile,
     storage,
 )
 from .cancellation import CancelledJob
@@ -32,6 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = ROOT / "models"
 ENGLISH_MODEL_DIR = MODELS_DIR / "turbo"
 RUSSIAN_MODEL_DIR = MODELS_DIR / "turbo-russian"
+FULL_MODEL_DIR = MODELS_DIR / "large-v3"
 RUSSIAN_REPO = "coriollon/whisper-large-v3-turbo-russian"
 ENGLISH_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
 MODEL_REVISIONS = {
@@ -57,17 +60,10 @@ _model_devices: dict[str, str] = {}
 
 
 def punctuation_prompt(language: str) -> str:
-    """Инструкция модели оформлять текст со знаками препинания.
+    """Punctuation context used by Studio and dictation.
 
-    Русская дообученная модель без такой инструкции скатывается в текст без
-    пунктуации и заглавных букв. Замер на 180 с реальной записи (УАЗ, 28
-    сегментов): без инструкции знаки были в 0% сегментов, с инструкцией — в
-    100%, при том же числе слов (422) и том же времени (14.6 с против 15.3 с).
-    На готовых файлах пользователя это видно в цифрах: 7% сегментов со знаками
-    у скачанного видео и 44% у другой записи.
-
-    Диктовка эту инструкцию передавала с самого начала и поэтому всегда была
-    оформлена нормально; транскрибация файлов не передавала ничего.
+    Telegram's speech profile deliberately omits this context: quiet pauses
+    in the user's recording echoed the instruction instead of the audio.
     """
     if language == "ru":
         return (
@@ -219,8 +215,8 @@ def cpu_threads() -> int:
 
 
 def _load_model(language: str) -> tuple[WhisperModel, str]:
-    model_key = "ru" if language == "ru" else "turbo"
-    model_path = RUSSIAN_MODEL_DIR if model_key == "ru" else ENGLISH_MODEL_DIR
+    model_key = "large-v3" if language == "large-v3" else ("ru" if language == "ru" else "turbo")
+    model_path = FULL_MODEL_DIR if model_key == "large-v3" else (RUSSIAN_MODEL_DIR if model_key == "ru" else ENGLISH_MODEL_DIR)
 
     with _model_lock:
         cached = _models.get(model_key)
@@ -228,6 +224,8 @@ def _load_model(language: str) -> tuple[WhisperModel, str]:
             return cached, _model_devices[model_key]
 
         if not (model_path / "model.bin").exists():
+            if model_key == "large-v3":
+                raise RuntimeError("Полная модель large-v3 не установлена. Установите её в models/large-v3 перед выбором этого режима.")
             prepare_model_files()
 
         preferred = runtime.preferred_device()
@@ -237,7 +235,7 @@ def _load_model(language: str) -> tuple[WhisperModel, str]:
                 model = WhisperModel(
                     str(model_path),
                     device="cuda",
-                    compute_type="int8_float32",
+                    compute_type="float16" if model_key == "large-v3" else "int8_float32",
                     cpu_threads=cpu_threads(),
                     num_workers=1,
                 )
@@ -348,7 +346,10 @@ def _write_outputs(
     )
 
     txt_path = output_dir / f"{stem}.txt"
-    txt_path.write_text(txt + "\n", encoding="utf-8")
+    txt_path.write_text(
+        txt + "\n",
+        encoding="utf-8-sig" if job["options"].get("integration_source") == "telegram" else "utf-8",
+    )
     storage.add_output(job["id"], "txt", txt_path)
 
     md_path = output_dir / f"{stem}.md"
@@ -406,6 +407,9 @@ def _write_outputs(
                 # двадцатикратное замедление, и видно его не было нигде.
                 "device": info.get("device"),
                 "transcription_profile": info.get("transcription_profile"),
+                "model": info.get("model", "studio"),
+                "beam_size": info.get("beam_size"),
+                "punctuation_model": info.get("punctuation_model"),
                 # Снятые галлюцинации не выбрасываются, а лежат рядом с
                 # результатом: всегда можно проверить, что именно убрали и
                 # почему. В сам текст и в segments они уже не попадают.
@@ -603,7 +607,9 @@ def transcribe_job(job_id: str) -> None:
             trim_offset = 0.0
 
         cancellation.check(job_id)
-        beam_size = 1 if options["quality"] == "fast" else 5
+        full_accuracy = options.get("model") == "large-v3" and options["quality"] == "accurate"
+        beam_size = 10 if full_accuracy else (1 if options["quality"] == "fast" else 5)
+        model_selector = "large-v3" if options.get("model") == "large-v3" else language
         # Храним метки слов всегда: пользователь может менять детализацию
         # просмотра и экспорта без повторного распознавания.
         word_timestamps = True
@@ -613,22 +619,13 @@ def transcribe_job(job_id: str) -> None:
             "task": "transcribe",
             "beam_size": beam_size,
             "best_of": beam_size,
-            # VAD распознаёт обычную речь, но может отбросить пение и тихие
-            # реплики ещё до Whisper. Файлы передаём полностью: у песни
-            # «Вернулись» VAD оставлял лишь 135.744 с из 319.68 с.
-            "vad_filter": False,
+            # Telegram is a speech workflow. Detect speech there so pauses and
+            # room noise are not turned into invented sentences. Keep the full
+            # audio path for Studio recordings (including songs/quiet vocals).
+            "vad_filter": options.get("integration_source") == "telegram",
             "word_timestamps": word_timestamps,
-            # hotwords, а не initial_prompt: initial_prompt попадает только в
-            # первое 30-секундное окно, и при condition_on_previous_text=False
-            # инструкция теряется дальше — на замере это дало лишь 15% сегментов
-            # со знаками. hotwords подмешивается в каждое окно и дал 100%, не
-            # включая перенос контекста между окнами.
-            #
-            # Пунктуация запрашивается всегда, независимо от настройки
-            # «Со знаками / Без знаков»: JSON хранит сырой текст модели, и
-            # переключатель в просмотре работает уже по нему. Просить текст без
-            # знаков было бы необратимо.
-            "hotwords": punctuation_prompt(language),
+            # Telegram omits synthetic text context: repeating a punctuation
+            # instruction in every window made the recording echo it.
             "condition_on_previous_text": False,
             # Повтор фразы может быть частью записи (например, припевом).
             # Зацикливание ограничивается сбросом контекста и проверкой
@@ -639,6 +636,18 @@ def transcribe_job(job_id: str) -> None:
             "log_prob_threshold": -0.8,
             "no_speech_threshold": 0.65,
         }
+        if full_accuracy:
+            decode_options.update(patience=2.0, temperature=0.0)
+        if decode_options["vad_filter"]:
+            decode_options["vad_parameters"] = {
+                "threshold": 0.2 if full_accuracy else 0.35,
+                "min_silence_duration_ms": 700 if full_accuracy else 500,
+                "speech_pad_ms": 600 if full_accuracy else 400,
+            }
+        elif not full_accuracy:
+            # Preserve Studio's existing punctuation behavior. The Telegram
+            # speech profile has no hotwords or initial prompt.
+            decode_options["hotwords"] = punctuation_prompt(language)
 
         clip_duration = _clip_duration(source_path, options)
         windows = longform.plan(clip_duration)
@@ -652,10 +661,11 @@ def transcribe_job(job_id: str) -> None:
             # Файл короткий — прежний путь, одним проходом, без лишних вызовов
             # ffmpeg и без чекпоинтов: памяти на такой файл хватает с запасом.
             with gpu_turns.batch():
-                model, device = _load_model(language)
-                generator, info = model.transcribe(
-                    str(source_path), **decode_options
-                )
+                model, device = _load_model(model_selector)
+                if full_accuracy:
+                    generator, info = speech_profile.transcribe(model, source_path, decode_options, job_id)
+                else:
+                    generator, info = model.transcribe(str(source_path), **decode_options)
                 detected_language = info.language
                 language_probability = info.language_probability
                 clip_duration = max(float(info.duration), clip_duration, 0.001)
@@ -693,10 +703,11 @@ def transcribe_job(job_id: str) -> None:
                         end_seconds=window_end,
                     )
                     with gpu_turns.batch():
-                        model, device = _load_model(language)
-                        generator, info = model.transcribe(
-                            str(window_path), **decode_options
-                        )
+                        model, device = _load_model(model_selector)
+                        if full_accuracy:
+                            generator, info = speech_profile.transcribe(model, window_path, decode_options, job_id)
+                        else:
+                            generator, info = model.transcribe(str(window_path), **decode_options)
                         if window_start <= 0:
                             detected_language = info.language
                             language_probability = info.language_probability
@@ -717,8 +728,11 @@ def transcribe_job(job_id: str) -> None:
         # Мусор снимается до разметки спикеров: иначе Pyannote тратит время на
         # фразы, которых в записи не было, и они получают своего «спикера».
         items, dropped = hallucinations.clean_segments(
-            items, prompt=decode_options["hotwords"]
+            items, prompt=decode_options.get("hotwords", "")
         )
+        if full_accuracy and detected_language == "ru" and options["formatting"] == "formatted":
+            storage.update_job(job_id, progress=0.98)
+            items = punctuation.restore(items, job_id)
         if options.get("diarization"):
             storage.update_job(job_id, progress=0.985)
             with gpu_turns.batch():
@@ -743,7 +757,10 @@ def transcribe_job(job_id: str) -> None:
             "language_probability": language_probability,
             "duration": clip_duration,
             "device": device,
-            "transcription_profile": longform.TRANSCRIPTION_PROFILE,
+            "transcription_profile": longform.profile(options),
+            "model": options.get("model", "studio"),
+            "beam_size": beam_size,
+            "punctuation_model": punctuation.MODEL_REPO if full_accuracy and detected_language == "ru" and options["formatting"] == "formatted" else None,
             "removed_hallucinations": dropped,
         }
         clean_options = _clean_rerun_options(options)

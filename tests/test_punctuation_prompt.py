@@ -1,13 +1,4 @@
-"""Транскрибация файлов обязана просить у модели знаки препинания.
-
-Русская дообученная модель без инструкции выдаёт текст без пунктуации и
-заглавных букв: на готовом файле пользователя знаки были только в 7% сегментов.
-Инструкция передаётся через hotwords, а не initial_prompt, потому что
-initial_prompt попадает только в первое окно и при выключенном переносе
-контекста теряется дальше.
-
-Запуск:  .venv\\Scripts\\python.exe -m unittest tests.test_punctuation_prompt
-"""
+"""Telegram omits synthetic prompts; Studio keeps its punctuation context."""
 from __future__ import annotations
 
 import shutil
@@ -82,8 +73,15 @@ class TranscribeCallTests(unittest.TestCase):
         storage.init_db()
         self.model = _SpyModel()
         transcriber._load_model = lambda language: (self.model, "cpu")
+        from unittest.mock import patch
+        self.punctuation = patch.object(transcriber.punctuation, "restore", side_effect=lambda segments, _: segments)
+        self.punctuation.start()
+        self.speech = patch.object(transcriber.speech_profile, "transcribe", side_effect=lambda model, path, options, _: model.transcribe(path, **options))
+        self.speech.start()
 
     def tearDown(self) -> None:
+        self.punctuation.stop()
+        self.speech.stop()
         for key in ("DB_PATH", "DATA_DIR", "UPLOADS_DIR", "TEMP_DIR"):
             setattr(storage, key, self._saved[key])
         storage.DEFAULT_SETTINGS.clear()
@@ -91,7 +89,7 @@ class TranscribeCallTests(unittest.TestCase):
         transcriber._load_model = self._saved["_load_model"]
         shutil.rmtree(self._root, ignore_errors=True)
 
-    def _run(self, language: str = "ru", formatting: str = "formatted") -> dict:
+    def _run(self, language: str = "ru", formatting: str = "formatted", source: str = "", model: str = "studio") -> dict:
         session = storage.create_session("Проверка пунктуации")
         media_dir = storage.session_dir(session["id"]) / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
@@ -104,20 +102,21 @@ class TranscribeCallTests(unittest.TestCase):
             {
                 "language": language,
                 "quality": "accurate",
+                "model": model,
                 "timestamps": "segments",
                 "formatting": formatting,
                 "diarization": False,
+                "integration_source": source,
             },
         )
         transcriber.transcribe_job(job["id"])
         self.assertEqual(len(self.model.calls), 1)
         return self.model.calls[0]
 
-    def test_hotwords_carry_the_instruction(self) -> None:
-        call = self._run()
-        self.assertEqual(
-            call["hotwords"], transcriber.punctuation_prompt("ru")
-        )
+    def test_telegram_does_not_receive_synthetic_text(self) -> None:
+        call = self._run(source="telegram")
+        self.assertFalse(call.get("hotwords"))
+        self.assertFalse(call.get("initial_prompt"))
 
     def test_context_carryover_stays_off(self) -> None:
         """Инструкция не должна протаскиваться ценой переноса контекста.
@@ -129,21 +128,35 @@ class TranscribeCallTests(unittest.TestCase):
         call = self._run()
         self.assertFalse(call["condition_on_previous_text"])
 
-    def test_instruction_matches_the_job_language(self) -> None:
-        call = self._run(language="en")
-        self.assertEqual(
-            call["hotwords"], transcriber.punctuation_prompt("en")
-        )
+    def test_english_telegram_also_has_no_instruction(self) -> None:
+        call = self._run(language="en", source="telegram")
+        self.assertFalse(call.get("hotwords"))
 
-    def test_requested_even_without_punctuation_in_output(self) -> None:
-        """JSON хранит сырой текст, поэтому знаки просим всегда.
+    def test_plain_output_also_has_no_instruction(self) -> None:
+        call = self._run(formatting="plain", source="telegram")
+        self.assertFalse(call.get("hotwords"))
 
-        При formatting=plain знаки срезаются уже на выводе, но в JSON остаётся
-        оригинал — иначе переключатель «Со знаками» в просмотре стал бы
-        необратимым.
-        """
-        call = self._run(formatting="plain")
-        self.assertTrue(call["hotwords"])
+    def test_telegram_detects_speech_but_studio_keeps_full_audio(self) -> None:
+        call = self._run(source="telegram")
+        self.assertTrue(call["vad_filter"])
+        self.assertLess(call["vad_parameters"]["threshold"], 0.5)
+        self.assertGreaterEqual(call["vad_parameters"]["speech_pad_ms"], 400)
+
+    def test_studio_keeps_existing_punctuation_context_and_full_audio(self) -> None:
+        call = self._run()
+        self.assertEqual(call["hotwords"], transcriber.punctuation_prompt("ru"))
+        self.assertFalse(call["vad_filter"])
+
+    def test_full_model_prioritizes_accuracy_without_echo_prone_hotwords(self) -> None:
+        call = self._run(source="telegram", model="large-v3")
+        self.assertEqual(call["beam_size"], 10)
+        self.assertEqual(call["patience"], 2.0)
+        self.assertFalse(call["condition_on_previous_text"], "Pauses must not inherit repeated text")
+        self.assertTrue(call["vad_filter"])
+        self.assertEqual(call["vad_parameters"]["threshold"], 0.2)
+        self.assertEqual(call["temperature"], 0.0)
+        self.assertFalse(call.get("hotwords"))
+        self.assertFalse(call.get("initial_prompt"))
 
 
 if __name__ == "__main__":

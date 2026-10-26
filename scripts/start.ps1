@@ -1,6 +1,7 @@
-param(
+﻿param(
     [switch]$NoBrowser,
-    [switch]$BackendOnly
+    [switch]$BackendOnly,
+    [switch]$WithTelegram
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +10,8 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $runtimeDir = Join-Path $projectRoot "run"
 $logsDir = Join-Path $projectRoot "logs"
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$dedicatedBotPython = Join-Path $projectRoot "vendor\telegram-python\WhisperTelegram.exe"
+$botPythonPath = if (Test-Path -LiteralPath $dedicatedBotPython) { $dedicatedBotPython } else { $pythonPath }
 $cudaBin = Join-Path $projectRoot "vendor\cuda\bin"
 $backendPidFile = Join-Path $runtimeDir "backend.pid"
 $frontendPidFile = Join-Path $runtimeDir "frontend.pid"
@@ -73,7 +76,7 @@ function Get-ServiceProcess(
                 $commandLine -match "backend\.app:app"
         }
         "telegram" {
-            $process.ExecutablePath -eq $pythonPath -and
+            $process.ExecutablePath -in @($pythonPath, $dedicatedBotPython) -and
                 $commandLine -match "telegram_bot"
         }
         default {
@@ -286,11 +289,16 @@ if ($BackendOnly) {
 # Телеграм-бот. Условий два, и они про разное: токен в файле настроек бота
 # отвечает, настроен ли он вообще, а telegram_autostart в настройках сервиса —
 # нужен ли он сейчас. Так эксперимент выключается переключателем в интерфейсе,
-# не стирая токен и не отзывая его у @BotFather.
+# не стирая токен и не отзывая его у @BotFather. -WithTelegram запускает бота
+# явно только на этот сеанс и не включает постоянную настройку автозапуска.
 $botPidFile = Join-Path $runtimeDir "telegram.pid"
 $botConfigPath = Join-Path $projectRoot "data" | Join-Path -ChildPath "telegram.json"
 $botProcess = Get-ServiceProcess $botPidFile "telegram"
-if (-not $botProcess -and (Test-Path -LiteralPath $botConfigPath)) {
+if (
+    -not $botProcess -and
+    (Test-Path -LiteralPath $botConfigPath) -and
+    (Test-Path -LiteralPath (Join-Path $projectRoot "telegram_bot\__main__.py"))
+) {
     $botConfigured = $false
     try {
         $botConfig = Get-Content -LiteralPath $botConfigPath -Raw |
@@ -304,22 +312,24 @@ if (-not $botProcess -and (Test-Path -LiteralPath $botConfigPath)) {
     }
     # Настройка лежит в базе сервиса, а не в файле бота: её меняют из
     # интерфейса. Backend к этому моменту уже отвечает — его дождались выше.
-    $botAllowed = $true
-    try {
-        $serviceSettings = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:8765/api/settings" `
-            -TimeoutSec 5
-        $botAllowed = ([string]$serviceSettings.telegram_autostart -ne "off")
-    }
-    catch {
-        # Настройки не дочитались — ведём себя по умолчанию, а не выключаем
-        # молча то, что человек включал.
-        $botAllowed = $true
+    $botAllowed = [bool]$WithTelegram
+    if (-not $WithTelegram) {
+        try {
+            $serviceSettings = Invoke-RestMethod `
+                -Uri "http://127.0.0.1:8765/api/settings" `
+                -TimeoutSec 5
+            $botAllowed = ([string]$serviceSettings.telegram_autostart -eq "on")
+        }
+        catch {
+            # Ошибка чтения настроек не должна запускать отложенного бота.
+            $botAllowed = $false
+            Write-Warning "Не удалось прочитать настройку запуска Telegram; бот не запущен."
+        }
     }
 
     if ($botConfigured -and $botAllowed) {
         $bot = Start-Process `
-            -FilePath $pythonPath `
+            -FilePath $botPythonPath `
             -ArgumentList @("-m", "telegram_bot") `
             -WorkingDirectory $projectRoot `
             -RedirectStandardOutput (Join-Path $logsDir "telegram.out.log") `

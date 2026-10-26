@@ -16,6 +16,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from docx import Document
+
 from backend import exporter, paragraphs
 
 
@@ -255,6 +257,63 @@ class ProjectFilesTests(unittest.TestCase):
             ):
                 self.assertEqual(exporter.refresh_project_files("project-1"), [])
             self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_filtered_exports_are_named_and_marked_separately(self) -> None:
+        payload = self._payload()
+        payload[2][0]["segments"] = [
+            _segment("Вопрос заказчика.", 0, 3, "SPEAKER_00"),
+            _segment("Большой ответ исполнителя.", 3, 9, "SPEAKER_01"),
+        ]
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder, patch.object(
+            exporter, "_project_payload", return_value=payload
+        ), patch.object(
+            exporter.storage, "list_speaker_aliases", return_value={}
+        ), patch.object(
+            exporter.storage, "session_dir", return_value=Path(folder)
+        ):
+            for kind in ("txt", "md", "docx", "srt", "vtt", "json"):
+                full = exporter.create_project_export("project-1", kind, speakers="on")
+                original = full.read_bytes()
+                partial = exporter.create_project_export(
+                    "project-1", kind, speakers="on", speaker_keys={"job-1:SPEAKER_00"}
+                )
+                self.assertNotEqual(full, partial)
+                self.assertIn("только-выбранные-спикеры", partial.name)
+                self.assertEqual(full.read_bytes(), original)
+                if kind == "docx":
+                    text = "\n".join(p.text for p in Document(partial).paragraphs)
+                else:
+                    text = partial.read_text(encoding="utf-8")
+                self.assertIn("Вопрос заказчика.", text)
+                self.assertNotIn("Большой ответ исполнителя.", text)
+                if kind in {"txt", "md", "docx"}:
+                    self.assertIn("ЧАСТИЧНАЯ РАСШИФРОВКА", text)
+
+
+class SpeakerFilterTests(unittest.TestCase):
+    def test_selecting_all_preserves_unlabelled_speech_and_original_text(self) -> None:
+        segments = [
+            {**_segment("Весь исходный текст, включая слова без меток.", 0, 8, "A"),
+             "words": [{"word": "Весь", "start": 0, "end": 1, "speaker": "A"}]},
+            _segment("Реплика без спикера.", 8, 10),
+            _segment("Ответ второго участника.", 10, 15, "B"),
+        ]
+        for timestamps in ("none", "segments", "words"):
+            self.assertEqual(
+                exporter._render_file_text(segments, timestamps, "formatted", "on", "j", {}, {"j:A", "j:B"}),
+                exporter._render_file_text(segments, timestamps, "formatted", "on", "j", {}, None),
+            )
+
+    def test_explicit_subset_keeps_only_requested_speaker(self) -> None:
+        segments = [
+            {**_segment("Вопрос. Ответ.", 0, 4, "A"), "words": [
+                {"word": "Вопрос.", "start": 0, "end": 2, "speaker": "A"},
+                {"word": "Ответ.", "start": 2, "end": 4, "speaker": "B"},
+            ]},
+        ]
+        text = exporter._render_file_text(segments, "none", "formatted", "on", "j", {}, {"j:B"})
+        self.assertIn("Ответ.", text)
+        self.assertNotIn("Вопрос.", text)
 
 
 if __name__ == "__main__":
