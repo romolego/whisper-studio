@@ -67,10 +67,13 @@ FILES = (
     "README.md",
     "RESTORE.md",
     "INSTALL.md",
+    "REMOTE.md",
+    "LAPTOP_SETUP.md",
     "AGENTS.md",
     ".gitignore",
     "Установить Whisper.bat",
     "Запустить Whisper.bat",
+    "Запустить удалённый GPU.bat",
     "Остановить Whisper.bat",
     "Проверить Whisper.bat",
 )

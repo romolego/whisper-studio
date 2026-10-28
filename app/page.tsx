@@ -1,5 +1,7 @@
 "use client";
 
+import RemoteComputeSettings from "./RemoteComputeSettings";
+
 import {
   ChangeEvent,
   DragEvent,
@@ -304,7 +306,7 @@ type Job = {
   processing_seconds: number | null;
   // На чём считал Whisper. cpu означает откат с видеокарты и примерно
   // двадцатикратное замедление, поэтому это надо показывать, а не прятать.
-  device?: "cuda" | "cpu" | null;
+  device?: "cuda" | "cpu" | "remote" | "remote_cuda" | "remote_cpu" | null;
   error: string | null;
   created_at: string;
   outputs: Record<string, string>;
@@ -5984,20 +5986,23 @@ export default function Home() {
                                 {job.device && (
                                   <span
                                     className={
-                                      job.device === "cpu"
+                                      job.device.endsWith("cpu")
                                         ? "metric-warning"
                                         : undefined
                                     }
                                     title={
-                                      job.device === "cpu"
-                                        ? "Видеокарта была недоступна, считал процессор — это примерно в 20 раз медленнее"
+                                      job.device.startsWith("remote_")
+                                        ? "Распознавание выполнено на удалённом компьютере"
+                                        : job.device === "cpu"
+                                        ? "Распознавание выполнено на процессоре"
                                         : "Распознавание шло на видеокарте"
                                     }
                                   >
                                     Считал{" "}
                                     <b>
-                                      {job.device === "cpu"
-                                        ? "процессор"
+                                      {job.device === "remote_cuda" ? "удалённая видеокарта"
+                                        : job.device === "remote_cpu" ? "удалённый процессор"
+                                        : job.device === "cpu" ? "процессор"
                                         : "видеокарта"}
                                     </b>
                                   </span>
@@ -6516,6 +6521,7 @@ export default function Home() {
             </header>
 
             <div className="settings-layout">
+              <RemoteComputeSettings onChange={() => { void refresh(); }} />
               <section className="settings-card">
                 <div className="settings-card-title">
                   <span>01</span>

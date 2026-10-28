@@ -4857,3 +4857,25 @@ input {
   font-size: 13px;
   line-height: 1;
 }
+
+.remote-code-label {
+  display: block;
+  margin: 16px 20px 8px;
+}
+
+.remote-compute-card > p {
+  margin: 16px 20px;
+}
+
+.remote-compute-card > input {
+  width: calc(100% - 40px);
+  margin: 0 20px;
+  min-width: 0;
+}
+
+.remote-compute-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 20px;
+}

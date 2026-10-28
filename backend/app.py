@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import cancellation
+from .remote_api import router as remote_router
 from . import diarization as diarization_service
 from . import (
     components,
@@ -54,6 +55,7 @@ DiarizationEngine = Literal["pyannote", "nemotron"]
 
 
 app = FastAPI(title="Локальный Whisper API", version="2.0.0")
+app.include_router(remote_router)
 app.add_middleware(
     CORSMiddleware,
     # Интерфейс живёт на 3000, но start.ps1 при занятом порте берёт следующий

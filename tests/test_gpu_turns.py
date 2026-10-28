@@ -152,6 +152,57 @@ class TurnOrderTests(unittest.TestCase):
             gpu_turns.checkpoint()
         self.assertEqual(gpu_turns.state()["batch_active"], 0)
 
+    def test_local_and_remote_batches_are_serialized(self) -> None:
+        entered = threading.Event()
+        leave = threading.Event()
+        second = threading.Event()
+
+        def first_job():
+            with gpu_turns.batch():
+                entered.set()
+                leave.wait(5)
+
+        def second_job():
+            entered.wait(5)
+            with gpu_turns.batch():
+                second.set()
+
+        threads = [threading.Thread(target=first_job), threading.Thread(target=second_job)]
+        for thread in threads:
+            thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.assertFalse(second.wait(0.1))
+        finally:
+            leave.set()
+            for thread in threads:
+                thread.join(5)
+        self.assertTrue(second.is_set())
+        self.assertEqual(gpu_turns.state()["batch_active"], 0)
+
+    def test_waiting_remote_batch_can_be_cancelled(self) -> None:
+        requested = threading.Event()
+        cancelled = threading.Event()
+
+        def check():
+            if requested.is_set():
+                raise RuntimeError("cancelled")
+
+        def waiting_job():
+            try:
+                with gpu_turns.batch(cancel_check=check):
+                    self.fail("Cancelled batch acquired the GPU")
+            except RuntimeError:
+                cancelled.set()
+
+        with gpu_turns.batch():
+            thread = threading.Thread(target=waiting_job)
+            thread.start()
+            requested.set()
+            self.assertTrue(cancelled.wait(3))
+        thread.join(5)
+        self.assertEqual(gpu_turns.state()["batch_active"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

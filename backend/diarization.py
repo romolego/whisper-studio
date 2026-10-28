@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import cancellation, runtime, storage
+from . import cancellation, runtime, storage, remote_client
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,6 +223,8 @@ def _pyannote_available() -> bool:
 
 def engine_available(engine: str) -> bool:
     """Готов ли движок считать прямо сейчас. Только проверки файлов — дёшево."""
+    if remote_client.selected():
+        return bool(remote_client.speaker_status()["engines"].get(engine, {}).get("available"))
     if engine == "nemotron":
         return _nemotron_ready()
     return _pyannote_available()
@@ -279,6 +281,8 @@ def status() -> dict[str, Any]:
     лежат в engines, а any_available отвечает на вопрос «можно ли вообще
     разделять голоса».
     """
+    if remote_client.selected():
+        return remote_client.speaker_status()
     external = _external_ready()
     local = _local_package_installed()
     token_saved = bool(_saved_token())
@@ -636,7 +640,12 @@ def assign_speakers(
     всегда живут на шкале исходника, поэтому на обрезанном куске реплики
     движка нужно сдвинуть на ту же величину.
     """
-    if engine == "nemotron":
+    remote = remote_client.selected()
+    if remote:
+        turns = [tuple(item) for item in remote_client.compute(
+            remote, audio_path, {"kind": "diarization", "engine": engine}, task_id
+        )["turns"]]
+    elif engine == "nemotron":
         turns = _turns_nemotron(audio_path, task_id)
     elif _external_ready():
         turns = _turns_external(audio_path, task_id)

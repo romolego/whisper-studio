@@ -23,6 +23,7 @@ from . import (
     paragraphs,
     punctuation,
     runtime,
+    remote_client,
     speech_profile,
     storage,
 )
@@ -215,6 +216,9 @@ def cpu_threads() -> int:
 
 
 def _load_model(language: str) -> tuple[WhisperModel, str]:
+    remote = remote_client.selected()
+    if remote:
+        return remote_client.RemoteModel(language, remote), "remote"
     model_key = "large-v3" if language == "large-v3" else ("ru" if language == "ru" else "turbo")
     model_path = FULL_MODEL_DIR if model_key == "large-v3" else (RUSSIAN_MODEL_DIR if model_key == "ru" else ENGLISH_MODEL_DIR)
 
@@ -558,6 +562,7 @@ def _restore_previous_result(
     return True
 
 
+@remote_client.task_scope
 def transcribe_job(job_id: str) -> None:
     job = storage.get_job(job_id)
     options = job["options"]
@@ -662,6 +667,8 @@ def transcribe_job(job_id: str) -> None:
             # ffmpeg и без чекпоинтов: памяти на такой файл хватает с запасом.
             with gpu_turns.batch():
                 model, device = _load_model(model_selector)
+                if isinstance(model, remote_client.RemoteModel) and not full_accuracy:
+                    model.progress = lambda value: storage.update_job(job_id, progress=0.02 + 0.95 * value)
                 if full_accuracy:
                     generator, info = speech_profile.transcribe(model, source_path, decode_options, job_id)
                 else:
@@ -672,6 +679,7 @@ def transcribe_job(job_id: str) -> None:
                 items = _collect_segments(
                     generator, job_id, clip_duration, 0.0, 0.0, word_timestamps
                 )
+                device = getattr(model, "remote_device", device)
         else:
             # Длинный файл: окна по очереди. Пик памяти держится на уровне одного
             # окна, а после каждого окна результат уходит на диск, поэтому сбой
@@ -704,6 +712,11 @@ def transcribe_job(job_id: str) -> None:
                     )
                     with gpu_turns.batch():
                         model, device = _load_model(model_selector)
+                        if isinstance(model, remote_client.RemoteModel) and not full_accuracy:
+                            model.progress = lambda value: storage.update_job(
+                                job_id, progress=min(0.98, max(0.02, (
+                                    window_start - lead + value * (window_end - window_start + lead)
+                                ) / clip_duration)))
                         if full_accuracy:
                             generator, info = speech_profile.transcribe(model, window_path, decode_options, job_id)
                         else:
@@ -719,6 +732,7 @@ def transcribe_job(job_id: str) -> None:
                             window_start,
                             word_timestamps,
                         )
+                        device = getattr(model, "remote_device", device)
                 finally:
                     window_path.unlink(missing_ok=True)
                 longform.save(job, signature, window_end, items)
@@ -822,6 +836,7 @@ def transcribe_job(job_id: str) -> None:
             prepared_path.unlink()
 
 
+@remote_client.task_scope
 def diarize_existing_job(job_id: str) -> None:
     job = storage.get_job(job_id)
     options = job["options"]

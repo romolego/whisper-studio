@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import cancellation, gpu_turns, hallucinations, storage
+from . import cancellation, gpu_turns, hallucinations, storage, remote_client
 from .cancellation import CancelledJob
 from .transcriber import _load_model, punctuation_prompt
 
@@ -391,6 +391,7 @@ def _transcribe_candidate(
     )
 
 
+@remote_client.task_scope
 def transcribe_dictation_fragment(fragment_id: str) -> None:
     fragment = storage.get_dictation_fragment(fragment_id)
     started = time.perf_counter()

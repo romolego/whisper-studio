@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 _condition = threading.Condition()
@@ -73,12 +73,19 @@ def interactive() -> Iterator[None]:
 
 
 @contextmanager
-def batch() -> Iterator[None]:
+def batch(cancel_check: Callable[[], None] | None = None) -> Iterator[None]:
     """Слот для фоновой работы: уступает диктовке в checkpoint()."""
     global _batch_active
+    if getattr(_local, "batch", False):
+        yield
+        return
     with _condition:
-        while _interactive_pending():
-            _condition.wait()
+        while _interactive_pending() or _batch_active:
+            if cancel_check:
+                cancel_check()
+            _condition.wait(0.5 if cancel_check else None)
+        if cancel_check:
+            cancel_check()
         _batch_active += 1
     previous = getattr(_local, "batch", False)
     _local.batch = True
@@ -105,7 +112,7 @@ def checkpoint() -> None:
             return
         _batch_active -= 1
         _condition.notify_all()
-        while _interactive_pending():
+        while _interactive_pending() or _batch_active:
             _condition.wait()
         _batch_active += 1
 
