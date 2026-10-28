@@ -26,7 +26,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 
 # Фразы третьего уровня в реальной речи звучат постоянно: «спасибо за
@@ -345,10 +345,27 @@ def _prompt_echo_reason(segment: dict[str, Any], prompt: str) -> str | None:
     return None
 
 
+def _matches_prompt_echo(text: str, prompt: str) -> bool:
+    normalised = _normalise(text)
+    if len(normalised.split()) < 2:
+        return False
+    if f" {normalised} " in f" {_normalise(prompt)} ":
+        return True
+    for sentence in re.split(r"[.!?…]+", prompt):
+        phrase = _normalise(sentence)
+        if len(phrase.split()) < 2:
+            continue
+        repeats, remainder = divmod(len(normalised) + 1, len(phrase) + 1)
+        if repeats >= 2 and not remainder and normalised == " ".join([phrase] * repeats):
+            return True
+    return False
+
+
 def clean_segments(
     segments: list[dict[str, Any]],
     *,
     prompt: str = "",
+    is_silent: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Сегменты без мусора и список удалённого.
 
@@ -359,6 +376,11 @@ def clean_segments(
     removed: list[dict[str, Any]] = []
     for segment in segments:
         reason = _prompt_echo_reason(segment, prompt) if prompt else None
+        # Repetition can make later copies artificially confident. Text matching
+        # alone is not enough: remove these only after verifying the source audio.
+        if not reason and prompt and is_silent and _matches_prompt_echo(segment.get("text") or "", prompt):
+            if is_silent(segment):
+                reason = "эхо подсказки в подтверждённой цифровой тишине"
         if reason:
             cleaned = None
         else:

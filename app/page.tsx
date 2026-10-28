@@ -1,6 +1,7 @@
 "use client";
 
 import RemoteComputeSettings from "./RemoteComputeSettings";
+import PromptTools from "./PromptTools";
 
 import {
   ChangeEvent,
@@ -1579,6 +1580,7 @@ export default function Home() {
   const [editingHistoryId, setEditingHistoryId] = useState("");
   const [historyTextDraft, setHistoryTextDraft] = useState("");
   const [transcriptText, setTranscriptText] = useState("");
+  const [transcriptTextKey, setTranscriptTextKey] = useState("");
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [projectSpeakers, setProjectSpeakers] = useState<SpeakerEntry[]>([]);
   const [selectedSpeakerKeys, setSelectedSpeakerKeys] = useState<Set<string>>(
@@ -2022,6 +2024,12 @@ export default function Home() {
     activeProject?.completed_count,
   ]);
 
+  const transcriptViewKey = JSON.stringify([
+    screen, activeProjectId, viewTimestamps, viewFormatting, viewSpeakers,
+    speakerFilterValue, speakerNamesSignature,
+  ]);
+  const transcriptReady = !transcriptLoading && transcriptTextKey === transcriptViewKey;
+
   useEffect(() => {
     if (
       screen !== "project" ||
@@ -2030,6 +2038,7 @@ export default function Home() {
     ) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setTranscriptText("");
+      setTranscriptTextKey("");
       return;
     }
     const controller = new AbortController();
@@ -2048,13 +2057,20 @@ export default function Home() {
         if (!response.ok) throw new Error(await errorMessage(response));
         return response.text();
       })
-      .then(setTranscriptText)
+      .then((text) => {
+        if (!controller.signal.aborted) {
+          setTranscriptText(text);
+          setTranscriptTextKey(transcriptViewKey);
+        }
+      })
       .catch((error) => {
         if (error instanceof Error && error.name !== "AbortError") {
           setNotice(error.message);
         }
       })
-      .finally(() => setTranscriptLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setTranscriptLoading(false);
+      });
     return () => controller.abort();
   }, [
     screen,
@@ -2065,6 +2081,7 @@ export default function Home() {
     viewSpeakers,
     speakerFilterValue,
     speakerNamesSignature,
+    transcriptViewKey,
   ]);
 
   const projectJobs = useMemo(
@@ -4600,6 +4617,13 @@ export default function Home() {
           </div>
         )}
         <div className="queue-bar">
+          <PromptTools
+            transcript={screen === "project" && activeProject?.completed_count
+              ? transcriptReady ? transcriptText : ""
+              : undefined}
+            transcriptLoading={!transcriptReady}
+            onNotice={setNotice}
+          />
           {/* Состояние очереди живёт ровно в одном месте. Раньше слева стояло
               «Обработка сейчас не выполняется», а справа — «Очередь пуста»: два
               разных текста про один и тот же факт. */}

@@ -109,6 +109,7 @@ cookies*.txt
 *.onnx
 
 # Local development notes and tool state
+/output/
 /.openai/*
 /AUDIT_PROMPT_FOR_CLAUDE.md
 /CLAUDE_AUDIT_REPORT.md

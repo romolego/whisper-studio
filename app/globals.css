@@ -512,6 +512,84 @@ a {
   font-size: 12px;
 }
 
+.prompt-tools {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.prompt-tool { position: relative; }
+
+.prompt-trigger {
+  min-height: 29px;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.prompt-trigger:hover, .prompt-trigger.active {
+  border-color: var(--line);
+  background: var(--panel-hover);
+  color: var(--ink);
+}
+
+.prompt-popover-wrap {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 35;
+  padding-top: 7px;
+  width: 440px;
+  max-width: calc(100vw - 32px);
+}
+
+.prompt-popover {
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+}
+
+.prompt-title { display: block; margin-bottom: 11px; font-size: 12px; }
+
+.prompt-copy-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 11px; }
+
+.prompt-copy-actions button {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.prompt-copy-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.prompt-copy-actions button:disabled { opacity: .5; cursor: default; }
+
+.prompt-content {
+  max-height: min(260px, calc(100dvh - 175px));
+  margin: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
 .queue-summary > span:first-child {
   flex: 0 0 auto;
   color: var(--faint);
@@ -549,6 +627,7 @@ a {
 
 .queue-inspector {
   position: relative;
+  min-width: 0;
   align-self: stretch;
   display: flex;
   align-items: center;
@@ -558,6 +637,7 @@ a {
 
 .queue-summary {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 7px;
   min-height: 30px;
@@ -4386,7 +4466,15 @@ input {
   .queue-bar {
     position: static;
     padding: 0 18px;
+    flex-wrap: wrap;
+    row-gap: 3px;
+    padding-top: 5px;
+    padding-bottom: 5px;
   }
+
+  .prompt-tool { position: static; }
+  .prompt-tools { position: relative; }
+  .prompt-popover-wrap { width: min(440px, calc(100vw - 36px)); }
 
   .queue-current p {
     max-width: 50vw;

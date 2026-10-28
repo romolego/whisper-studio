@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { stripTypeScriptTypes } from "node:module";
 
 
 async function render() {
@@ -27,6 +28,22 @@ test("server-renders the local Whisper shell", async () => {
   assert.match(html, /Перетащите или нажмите, чтобы добавить файлы/i);
   assert.match(html, /Новый проект/i);
   assert.match(html, /Настройки/i);
+  assert.match(html, /Промпты для транскрибации/);
+  assert.match(html, /Резюме/);
+  assert.match(html, /Цифровой протокол/);
+  assert.match(html, /Схема/);
+});
+
+test("prompt copying preserves the prompt and the exact current transcript", async () => {
+  const source = await readFile(new URL("../app/transcript-prompts.ts", import.meta.url), "utf8");
+  const { transcriptPrompts, promptWithTranscript } = await import(
+    `data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source)).toString("base64")}`
+  );
+  assert.deepEqual(transcriptPrompts.map(p => p.label), ["Резюме", "Цифровой протокол", "Схема"]);
+  const transcript = "СПИКЕР 2:\n[00:00:01.250] Привет!\n\n  Исходные пробелы.\n";
+  for (const prompt of transcriptPrompts) {
+    assert.equal(promptWithTranscript(prompt.text, transcript), `${prompt.text}\n\nТранскрибация:\n${transcript}`);
+  }
 });
 
 

@@ -274,6 +274,23 @@ class PromptEchoTests(unittest.TestCase):
         self.assertEqual(kept, sources)
         self.assertEqual(removed, [])
 
+    def test_repeated_prompt_echo_requires_verified_silence(self) -> None:
+        source = self.segment("Русская устная речь. Русская устная речь.", probability=0.7)
+        for silent in (None, lambda segment: False):
+            kept, removed = hallucinations.clean_segments([source], prompt=self.PROMPT, is_silent=silent)
+            self.assertEqual(kept, [source])
+            self.assertEqual(removed, [])
+        kept, removed = hallucinations.clean_segments([source], prompt=self.PROMPT, is_silent=lambda segment: True)
+        self.assertEqual(kept, [])
+        self.assertIn("цифровой тишине", removed[0]["reason"])
+
+    def test_silence_does_not_delete_unrelated_or_partially_matching_text(self) -> None:
+        sources = [self.segment("Русская устная речь нужна. Продолжаем.", probability=.7),
+                   self.segment("Настоящий припев. Настоящий припев.", probability=.7)]
+        kept, removed = hallucinations.clean_segments(sources, prompt=self.PROMPT, is_silent=lambda segment: True)
+        self.assertEqual(kept, sources)
+        self.assertEqual(removed, [])
+
 
 class DictationTests(unittest.TestCase):
     """Диктовка: то же самое, но на готовом тексте без таймкодов."""

@@ -742,7 +742,12 @@ def transcribe_job(job_id: str) -> None:
         # Мусор снимается до разметки спикеров: иначе Pyannote тратит время на
         # фразы, которых в записи не было, и они получают своего «спикера».
         items, dropped = hallucinations.clean_segments(
-            items, prompt=decode_options.get("hotwords", "")
+            items, prompt=decode_options.get("hotwords", ""),
+            is_silent=lambda segment: media.is_digital_silence(
+                source_path, float(segment.get("start") or 0)-trim_offset,
+                float(segment.get("end") or 0)-trim_offset,
+                options.get("audio_stream_index") if source_path != prepared_path else None,
+            ),
         )
         if full_accuracy and detected_language == "ru" and options["formatting"] == "formatted":
             storage.update_job(job_id, progress=0.98)

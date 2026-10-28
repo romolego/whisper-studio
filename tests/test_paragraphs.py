@@ -258,6 +258,38 @@ class ProjectFilesTests(unittest.TestCase):
                 self.assertEqual(exporter.refresh_project_files("project-1"), [])
             self.assertEqual(list(Path(folder).iterdir()), [])
 
+    def test_exports_without_speaker_labels_do_not_claim_speakers(self) -> None:
+        payload = self._payload()
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder, patch.object(
+            exporter, "_project_payload", return_value=payload
+        ), patch.object(exporter.storage, "list_speaker_aliases", return_value={}), patch.object(
+            exporter.storage, "session_dir", return_value=Path(folder)
+        ):
+            for timestamps in ("segments", "words"):
+                for kind in ("txt", "md", "docx", "srt", "vtt", "json"):
+                    with self.subTest(timestamps=timestamps, kind=kind):
+                        target = exporter.create_project_export("project-1", kind, timestamps, speakers="on")
+                        self.assertNotIn("по-спикерам", target.name)
+
+    def test_speaker_suffix_requires_labels_in_the_exported_selection(self) -> None:
+        payload = self._payload()
+        payload[2][0]["segments"] = [
+            _segment("Текст с меткой.", 0, 3, "SPEAKER_00"),
+            _segment("Текст без метки.", 3, 6),
+        ]
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder, patch.object(
+            exporter, "_project_payload", return_value=payload
+        ), patch.object(exporter.storage, "list_speaker_aliases", return_value={}), patch.object(
+            exporter.storage, "session_dir", return_value=Path(folder)
+        ):
+            marked = exporter.create_project_export("project-1", "txt", speakers="on")
+            self.assertIn("по-спикерам", marked.name)
+            self.assertIn("СПИКЕР 1:", marked.read_text(encoding="utf-8"))
+            hidden = exporter.create_project_export("project-1", "txt", speakers="off")
+            self.assertNotIn("по-спикерам", hidden.name)
+            absent = exporter.create_project_export("project-1", "txt", speakers="on", speaker_keys={"job-1:missing"})
+            self.assertNotIn("-по-спикерам", absent.name)
+
     def test_filtered_exports_are_named_and_marked_separately(self) -> None:
         payload = self._payload()
         payload[2][0]["segments"] = [

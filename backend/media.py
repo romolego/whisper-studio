@@ -1,16 +1,50 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import tempfile
 import threading
 import uuid
+import wave
 from array import array
 from pathlib import Path
 from typing import Any
 
 from . import cancellation, storage
+
+
+def is_digital_silence(source: Path, start: float, end: float, stream_index: int | None = None) -> bool:
+    """Verify exact silence, never treating quiet speech as an empty recording."""
+    if not all(math.isfinite(value) for value in (start, end)) or start < 0 or not 0 < end-start <= 120:
+        return False
+    try:
+        if source.suffix.lower() == ".wav":
+            with wave.open(str(source), "rb") as audio:
+                if audio.getcomptype() == "NONE" and audio.getsampwidth() in (2, 3, 4):
+                    rate = audio.getframerate()
+                    first, last = math.floor(start * rate), math.ceil(end * rate)
+                    if last > audio.getnframes():
+                        return False
+                    audio.setpos(first)
+                    data = audio.readframes(last-first)
+                    expected = (last-first) * audio.getsampwidth() * audio.getnchannels()
+                    return len(data) == expected and bool(data) and not data.strip(b"\0")
+    except (OSError, EOFError, wave.Error):
+        pass
+    tool = shutil.which("ffmpeg")
+    if not tool or not source.is_file():
+        return False
+    try:
+        result = subprocess.run([
+            tool, "-nostdin", "-v", "error", "-ss", str(start), "-i", str(source),
+            "-t", str(end-start), "-map", f"0:{stream_index}" if stream_index is not None else "0:a:0",
+            "-ar", "16000", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1",
+        ], capture_output=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return result.returncode == 0 and bool(result.stdout) and not result.stdout.strip(b"\0")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 _preview_lock = threading.Lock()

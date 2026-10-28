@@ -655,6 +655,14 @@ def create_project_export(
     aliases = storage.list_speaker_aliases(project_id)
     export_dir = storage.session_dir(project_id) / "project_exports"
     export_dir.mkdir(parents=True, exist_ok=True)
+    # A requested display option is not evidence of speaker labels in the export.
+    # Check the selected content, including labels stored only on words.
+    has_speakers = any(
+        _speaker_label(paragraphs.segment_speaker(segment), file["job_id"], aliases)
+        for file in files
+        for segment in _filtered_segments(file["segments"], file["job_id"], speaker_keys)
+    )
+    speakers = "on" if speakers == "on" and has_speakers else "off"
     timestamp_name = {
         "none": "без-таймкодов",
         "segments": "таймкоды-по-фразам",
