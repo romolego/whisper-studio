@@ -95,9 +95,9 @@ def host_heartbeat(payload: HostLease):
 
 
 @router.post("/host/stop")
-def stop_host(payload: HostLease):
+def stop_host(payload: HostLease | None = None):
     try:
-        remote_host.controller.stop(payload.lease)
+        remote_host.controller.stop(payload.lease if payload else None)
         return {"ok": True}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

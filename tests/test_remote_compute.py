@@ -161,6 +161,7 @@ class RemoteComputeTests(unittest.TestCase):
             response = self.session.get(server.url + "/api/remote/client")
             self.assertEqual(response.status_code, 200)
             self.assertNotIn("secret", response.text)
+            self.assertEqual(self.session.post(server.url + "/api/remote/host/stop").status_code, 200)
             response = self.session.put(server.url + "/api/remote/client", json={"mode": "local"},
                                         headers={"Origin": "https://evil.test"})
             self.assertEqual(response.status_code, 403)

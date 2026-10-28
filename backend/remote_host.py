@@ -334,11 +334,13 @@ class HostController:
                 raise ValueError("Неверный сеанс адаптера")
             self.touched = time.monotonic()
 
-    def stop(self, lease: str):
+    def stop(self, lease: str | None = None):
         with self.lock:
-            self.heartbeat(lease)
-            self.host.close()
-            self.server.should_exit = True
+            if lease is not None:
+                self.heartbeat(lease)
+            if self.host:
+                self.host.close()
+                self.server.should_exit = True
 
     def status(self):
         with self.lock:

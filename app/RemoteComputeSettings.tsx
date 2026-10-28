@@ -17,13 +17,29 @@ export default function RemoteComputeSettings({ onChange }: { onChange: () => vo
 
   useEffect(() => {
     let alive = true;
-    fetch(`${API}/client`).then(async (response) => {
+    const load = () => fetch(`${API}/client`).then(async (response) => {
       if (!response.ok) throw new Error("Не удалось прочитать настройки вычислений");
       const value = await response.json() as State;
       if (alive) setState(value);
     }).catch((error: Error) => { if (alive) setNotice(error.message); });
-    return () => { alive = false; };
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 5000);
+    return () => { alive = false; window.clearInterval(timer); };
   }, []);
+
+  async function stopAdapter() {
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/host/stop`, { method: "POST" });
+      if (!response.ok) throw new Error("Не удалось остановить адаптер");
+      setState((current) => current ? { ...current, host: { running: false, url: "" } } : current);
+      setNotice("Удалённый адаптер выключен. Локальная студия продолжает работать.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось остановить адаптер");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function action(kind: "check" | "remote" | "local") {
     setBusy(true);
@@ -78,6 +94,9 @@ export default function RemoteComputeSettings({ onChange }: { onChange: () => vo
     <p className="settings-note">На мощном компьютере запустите «Запустить удалённый GPU.bat».
       Для работы через интернет подключите оба устройства к одной сети Tailscale.
       Закройте окно адаптера, чтобы выключить удалённый доступ. Обычный запуск Whisper его не включает.</p>
-    {state?.host.running && <p role="status">Адаптер включён: {state.host.url}</p>}
+    {state?.host.running && <div className="remote-compute-actions">
+      <p role="status">Адаптер включён: {state.host.url}</p>
+      <button className="secondary-button" type="button" disabled={busy} onClick={stopAdapter}>Выключить адаптер</button>
+    </div>}
   </section>;
 }

@@ -74,6 +74,7 @@ FILES = (
     "Установить Whisper.bat",
     "Запустить Whisper.bat",
     "Запустить удалённый GPU.bat",
+    "Остановить удалённый GPU.bat",
     "Остановить Whisper.bat",
     "Проверить Whisper.bat",
 )
