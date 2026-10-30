@@ -93,16 +93,22 @@ class MaterialsTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             materials.image_file(self.project, first["id"])
 
-    def test_five_images_and_validation(self):
+    def test_image_validation_without_arbitrary_count_or_size_caps(self):
         revision = 0
         for _ in range(5):
             revision = materials.add_image(self.project, "x.png", PNG, revision)["revision"]
-        with self.assertRaises(ValueError):
-            materials.add_image(self.project, "six.png", PNG, revision)
+        revision = materials.add_image(self.project, "six.png", PNG, revision)["revision"]
         with self.assertRaises(ValueError):
             materials.add_image(self.project, "bad.png", b"not an image", revision)
-        with self.assertRaises(ValueError):
-            materials.add_image(self.project, "big.png", b"0" * (materials.MAX_IMAGE_BYTES + 1), revision)
+        source = self.root / "large.png"
+        with source.open("wb") as output:
+            output.write(PNG)
+            output.seek(21 * 1024 * 1024)
+            output.write(b"0")
+        added = materials.add_image(self.project, "large.png", source, revision)
+        revision = added["revision"]
+        path, _ = materials.image_file(self.project, added["images"][-1]["id"])
+        self.assertEqual(path.stat().st_size, source.stat().st_size)
         with self.assertRaises(ValueError):
             materials.edit_images(self.project, [{"id": "../fake", "note": ""}], revision)
         image = materials.get(self.project)["images"][0]
@@ -141,6 +147,13 @@ class MaterialsTests(unittest.TestCase):
         storage.update_session(self.project, name="Другое имя")
         self.assertEqual(materials.get(self.project)["summary"], "Сохраняется")
         self.assertTrue((storage.session_dir(self.project) / "materials" / "Резюме.docx").exists())
+
+    def test_reveal_opens_the_current_material_directory(self):
+        materials.save_text(self.project, "summary", "Материал", 0)
+        storage.update_session(self.project, name="Переименован")
+        with patch("backend.app.os.startfile", create=True) as launch:
+            self.assertEqual(materials_api.reveal(self.project), {"ok": True})
+        launch.assert_called_once_with(str(storage.session_dir(self.project) / "materials"))
 
     def test_bulk_folder_export_preserves_hidden_projects_and_reports_errors(self):
         materials.save_text(self.project, "summary", "Результат", 0)

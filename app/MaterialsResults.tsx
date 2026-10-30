@@ -15,7 +15,12 @@ export default function MaterialsResults({ api, projectId, onNotice }: { api: st
     void store.ready().then(() => downloadArtifact(url, name)).catch(reason => onNotice(reason.message));
   };
   return <section className="materials-results" aria-label="Материалы по транскрибации">
-    <div className="section-title"><div><div className="eyebrow">Результаты обработки</div><h2>Материалы по транскрибации</h2></div></div>
+    <div className="section-title"><div><div className="eyebrow">Результаты обработки</div><h2>Материалы по транскрибации</h2></div>
+      <button type="button" className="reveal-materials" onClick={() => {
+        void fetch(`${store.base}/reveal`, { method: "POST" }).then(async response => {
+          if (!response.ok) throw new Error((await response.json()).detail || "Не удалось открыть папку");
+        }).catch(reason => onNotice(reason.message));
+      }}>Открыть папку</button></div>
     {(["summary", "minutes"] as const).filter(kind => saved[kind].trim()).map(kind => {
       const label = kind === "summary" ? "Резюме" : "Протокол";
       return <article className="material-result" key={kind}>
@@ -34,6 +39,6 @@ export default function MaterialsResults({ api, projectId, onNotice }: { api: st
         <button type="button" onClick={() => save(`${store.base}/images/${image.id}?download=true`, image.name)}>↓ Скачать схему {index + 1}</button>
       </div></div>
     </article>)}
-    {viewer && <ImageViewer key={viewer.id} image={viewer} base={store.base} onClose={() => setImageId(null)} />}
+    {viewer && <ImageViewer image={viewer} images={store.data?.images || []} base={store.base} onNavigate={setImageId} onClose={() => setImageId(null)} />}
   </section>;
 }

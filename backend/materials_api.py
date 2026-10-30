@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -121,7 +122,7 @@ class ImageEdit(BaseModel):
 
 
 class ImagesEdit(BaseModel):
-    images: list[ImageEdit] = Field(max_length=5)
+    images: list[ImageEdit]
     revision: int = Field(ge=0)
 
 
@@ -152,14 +153,31 @@ def write(project_id: str, kind: Literal["summary", "minutes"], payload: TextEdi
 
 @router.post("/images")
 async def upload(project_id: str, revision: int = Form(ge=0), file: UploadFile = File()):
+    from starlette.concurrency import run_in_threadpool
+    _call(storage.get_session, project_id)
+    target = storage.temporary_dir() / f"scheme-{uuid.uuid4().hex}.upload"
+    def receive():
+        try:
+            with target.open("wb") as output:
+                import shutil
+                shutil.copyfileobj(file.file, output, 1024 * 1024)
+            return _call(materials.add_image, project_id, file.filename or "Схема", target, revision)
+        finally:
+            target.unlink(missing_ok=True)
     try:
-        content = await file.read(materials.MAX_IMAGE_BYTES + 1)
+        return await run_in_threadpool(receive)
     finally:
         await file.close()
-    # Decode/write outside the event loop.
-    from starlette.concurrency import run_in_threadpool
-    return await run_in_threadpool(_call, materials.add_image, project_id,
-                                  file.filename or "Схема", content, revision)
+
+
+@router.post("/reveal")
+def reveal(project_id: str):
+    from .app import OpenFolder, open_folder
+    from .project_locks import project_lock
+    with project_lock(project_id):
+        path = _call(materials.directory, project_id)
+        _call(open_folder, OpenFolder(path=str(path)))
+    return {"ok": True}
 
 
 @router.put("/images")

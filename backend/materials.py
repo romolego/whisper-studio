@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import uuid
 import zipfile
 from pathlib import Path
@@ -22,7 +23,6 @@ from . import exporter, storage
 from .project_locks import project_lock
 
 TEXT_KINDS = {"summary": "Резюме", "minutes": "Протокол"}
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -47,7 +47,7 @@ def _load(root: Path) -> dict:
         valid = (isinstance(data, dict) and type(data.get("schema_version")) is int and data["schema_version"] == 1
                  and type(data.get("revision")) is int and data["revision"] >= 0
                  and all(isinstance(data.get(kind), str) and len(data[kind]) <= 2_000_000 for kind in TEXT_KINDS)
-                 and isinstance(data.get("images"), list) and len(data["images"]) <= 5)
+                 and isinstance(data.get("images"), list))
         if not valid:
             raise ValueError("Invalid manifest")
         ids = set()
@@ -64,12 +64,16 @@ def _load(root: Path) -> dict:
     return data
 
 
-def atomic_write(path: Path, content: bytes) -> None:
+def atomic_write(path: Path, content: bytes | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temp.open("wb") as file:
-            file.write(content)
+            if isinstance(content, Path):
+                with content.open("rb") as source:
+                    shutil.copyfileobj(source, file, 1024 * 1024)
+            else:
+                file.write(content)
             file.flush()
             os.fsync(file.fileno())
         os.replace(temp, path)
@@ -173,36 +177,39 @@ def _remove_generated(path: Path) -> None:
         logger.warning("Could not remove generated artifact file: %s", path)
 
 
-def _image_extension(content: bytes) -> str:
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+def _image_extension(content: bytes | Path) -> str:
+    if isinstance(content, Path):
+        with content.open("rb") as source:
+            header = source.read(16)
+    else:
+        header = content[:16]
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
         extension = "png"
-    elif content.startswith(b"\xff\xd8\xff"):
+    elif header.startswith(b"\xff\xd8\xff"):
         extension = "jpg"
-    elif content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+    elif header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         extension = "webp"
     else:
         raise ValueError("Нужна картинка PNG, JPEG или WebP")
     try:
-        with av.open(io.BytesIO(content)) as image:
+        with av.open(str(content) if isinstance(content, Path) else io.BytesIO(content)) as image:
             stream = image.streams.video[0]
-            if not 0 < stream.width * stream.height <= 40_000_000:
-                raise ValueError("Картинка должна быть не больше 40 мегапикселей")
+            if stream.width <= 0 or stream.height <= 0:
+                raise ValueError("Не удалось определить размер картинки")
             next(image.decode(stream))
     except Exception as exc:
-        raise ValueError("Не удалось прочитать картинку (PNG, JPEG или WebP, до 40 Мп)") from exc
+        raise ValueError("Не удалось прочитать картинку (PNG, JPEG или WebP)") from exc
     return extension
 
 
-def add_image(project_id: str, name: str, content: bytes, revision: int) -> dict:
-    if not content or len(content) > MAX_IMAGE_BYTES:
-        raise ValueError("Размер картинки — до 20 МБ")
+def add_image(project_id: str, name: str, content: bytes | Path, revision: int) -> dict:
+    if (isinstance(content, Path) and content.stat().st_size == 0) or (isinstance(content, bytes) and not content):
+        raise ValueError("Файл картинки пуст")
     extension = _image_extension(content)
     with project_lock(project_id):
         root = _root(project_id)
         data = _load(root)
         _check(data, revision)
-        if len(data["images"]) >= 5:
-            raise ValueError("В проекте можно сохранить до пяти схем")
         image_id = uuid.uuid4().hex
         filename = f"{image_id}.{extension}"
         atomic_write(root / "images" / filename, content)
@@ -297,3 +304,11 @@ def zip_files(files: list[tuple[str, bytes]]) -> bytes:
         for name, content in files:
             archive.writestr(name, content)
     return output.getvalue()
+
+
+def directory(project_id: str) -> Path:
+    with project_lock(project_id):
+        root = _root(project_id)
+        if not root.is_dir():
+            raise KeyError(project_id)
+        return root

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { diagramWithMaterials, promptWithTranscript, transcriptPrompts } from "./transcript-prompts";
 import type { Materials } from "./useProjectMaterials";
 import { useProjectMaterials } from "./useProjectMaterials";
-import { DiagramMaterialPanel, PackagePanel, TextMaterialPanel } from "./MaterialPanels";
+import { uploadSchemes, DiagramMaterialPanel, PackagePanel, TextMaterialPanel } from "./MaterialPanels";
 
 type Props = {
   api?: string;
@@ -27,6 +27,9 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
   const [copying, setCopying] = useState(false);
   const root = useRef<HTMLElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draggingFiles = useRef(false);
+  const [receivingScheme, setReceivingScheme] = useState(false);
+  const [uploadingImages, setUploadingImages] = useState(false);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
@@ -34,7 +37,7 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
     if (closeTimer.current) clearTimeout(closeTimer.current);
   }
 
-  function close() { setOpen(null); void store.flush(); }
+  function close() { if (draggingFiles.current || uploadingImages) return; setOpen(null); void store.flush(); }
   function activate(id: string) { cancelClose(); setOpen(id); }
   const saved = store.persisted;
   const hasMaterials = !!saved && (!!saved.summary.trim() || !!saved.minutes.trim() || saved.images.length > 0);
@@ -43,19 +46,34 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
 
   useEffect(() => {
     function outside(event: PointerEvent) {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) { setOpen(null); void flushMaterials(); }
+      draggingFiles.current = false;
+      setReceivingScheme(false);
+      if (!draggingFiles.current && event.target instanceof Node && !root.current?.contains(event.target)) { setOpen(null); void flushMaterials(); }
     }
     function escape(event: KeyboardEvent) {
       if (event.key !== "Escape" || !open || document.querySelector(".scheme-viewer[open]")) return;
+      draggingFiles.current = false;
+      setReceivingScheme(false);
       event.preventDefault();
       if (root.current?.contains(document.activeElement)) {
         root.current.querySelector<HTMLButtonElement>(`[aria-controls="prompt-${open}"]`)?.focus();
       }
       setOpen(null); void flushMaterials();
     }
+    const drag = (event: DragEvent) => { if (event.dataTransfer?.types.includes("Files")) { draggingFiles.current = true; cancelClose(); } };
+    const endDrag = () => { draggingFiles.current = false; setReceivingScheme(false); };
+    const leaveDrag = (event: DragEvent) => { if (event.clientX <= 0 || event.clientY <= 0 || event.clientX >= window.innerWidth || event.clientY >= window.innerHeight) endDrag(); };
+    document.addEventListener("dragover", drag);
+    document.addEventListener("drop", endDrag);
+    document.addEventListener("dragend", endDrag);
+    document.addEventListener("dragleave", leaveDrag);
     document.addEventListener("pointerdown", outside);
     document.addEventListener("keydown", escape);
     return () => {
+      document.removeEventListener("dragover", drag);
+      document.removeEventListener("drop", endDrag);
+      document.removeEventListener("dragend", endDrag);
+      document.removeEventListener("dragleave", leaveDrag);
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("keydown", escape);
       if (closeTimer.current) clearTimeout(closeTimer.current);
@@ -101,19 +119,33 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
       onMouseLeave={() => {
         cancelClose();
         closeTimer.current = setTimeout(() => {
+          if (!document.hasFocus()) return;
           const focused = document.activeElement;
           const editing = root.current?.contains(focused) && (focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement);
-          if (!editing && !document.querySelector(".scheme-viewer[open]")) close();
+          if (!draggingFiles.current && !uploadingImages && !editing && !document.querySelector(".scheme-viewer[open]")) close();
         }, 900);
       }}
       onBlur={(event) => {
         // Temporarily disabled save/reorder buttons can lose focus to the body.
         // Only actual keyboard navigation out of the toolbar closes it here.
-        if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) close();
+        if (!draggingFiles.current && !uploadingImages && event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) close();
       }}
     >
       {transcriptPrompts.map((prompt) => (
-        <div className="prompt-tool" key={prompt.id} onMouseEnter={() => activate(prompt.id)}>
+        <div className={`prompt-tool${prompt.id === "diagram" && receivingScheme ? " scheme-drag-target" : ""}`} key={prompt.id} onMouseEnter={() => activate(prompt.id)}
+          onDragOver={event => {
+            if (prompt.id !== "diagram" || !projectId || !event.dataTransfer.types.includes("Files")) return;
+            event.preventDefault(); event.dataTransfer.dropEffect = "copy";
+            draggingFiles.current = true; setReceivingScheme(true); cancelClose(); setOpen("diagram");
+            setTabs(current => ({ ...current, diagram: "saved" }));
+          }} onDrop={event => {
+            if (prompt.id !== "diagram" || !projectId || !event.dataTransfer.types.includes("Files")) return;
+            event.preventDefault(); event.stopPropagation(); draggingFiles.current = false; setReceivingScheme(false); cancelClose();
+            const files = Array.from(event.dataTransfer.files);
+            setOpen("diagram"); setTabs(current => ({ ...current, diagram: "saved" })); setUploadingImages(true);
+            void uploadSchemes(store, files).catch(reason => { if (alive.current) onNotice(reason.message); })
+              .finally(() => { if (alive.current) setUploadingImages(false); });
+          }}>
           <button
             type="button"
             className={`prompt-trigger${open === prompt.id ? " active" : ""}`}
@@ -130,7 +162,7 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
           {open === prompt.id && (
             <div className="prompt-popover-wrap">
               <section className={`prompt-popover${tab === "saved" && projectId ? " material-popover" : ""}`} id={`prompt-${prompt.id}`} role="dialog" aria-label={prompt.title}>
-                <strong className="prompt-title">{prompt.title}</strong>
+                <strong className="prompt-title">{prompt.title}{prompt.id === "diagram" && uploadingImages ? " · Загружаю…" : ""}</strong>
                 {projectId && <div className="material-tabs" role="tablist" aria-label="Содержимое раздела">
                   <button type="button" role="tab" aria-selected={tab === "prompt"} onClick={() => { void store.flush(); setTabs(current => ({ ...current, [prompt.id]: "prompt" })); }}>Промпт</button>
                   <button type="button" role="tab" aria-selected={tab === "saved"} onClick={() => setTabs(current => ({ ...current, [prompt.id]: "saved" }))}>Сохранённое</button>

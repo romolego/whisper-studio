@@ -86,34 +86,55 @@ export function TextMaterialPanel({ kind, store, onNotice }: {
   </>;
 }
 
-export function ImageViewer({ image, base, onClose }: { image: ImageMaterial; base: string; onClose: () => void }) {
+export async function uploadSchemes(store: MaterialStore, files: FileList | File[]) {
+  await store.refresh();
+  for (const file of Array.from(files)) {
+    await store.mutate("/images", revision => {
+      const body = new FormData(); body.set("revision", String(revision)); body.set("file", file);
+      return { method: "POST", body };
+    });
+  }
+}
+
+export function ImageViewer({ image, images = [image], base, onClose, onNavigate }: {
+  image: ImageMaterial; images?: ImageMaterial[]; base: string; onClose: () => void; onNavigate?: (id: string) => void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const drag = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const index = images.findIndex(item => item.id === image.id);
+  function navigate(direction: number) {
+    const next = images[index + direction];
+    if (next && onNavigate) { setZoom(1); setOffset({ x: 0, y: 0 }); onNavigate(next.id); }
+  }
   useEffect(() => { dialog.current?.showModal(); }, []);
-  return <dialog ref={dialog} className="scheme-viewer" aria-label={`Просмотр: ${image.name}`} onCancel={event => {
-    event.preventDefault(); onClose();
-  }}>
+  return <dialog ref={dialog} className="scheme-viewer" aria-label={`Просмотр: ${image.name}`}
+    onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); navigate(event.key === "ArrowLeft" ? -1 : 1); } }}
+    onCancel={event => { event.preventDefault(); onClose(); }}>
     <div className="scheme-viewer-toolbar">
       <span>{image.name}</span>
+      {images.length > 1 && <>
+        <button type="button" aria-label="Предыдущая схема" disabled={index <= 0} onClick={() => navigate(-1)}>←</button>
+        <span className="scheme-viewer-counter">{index + 1} / {images.length}</span>
+        <button type="button" aria-label="Следующая схема" disabled={index >= images.length - 1} onClick={() => navigate(1)}>→</button>
+      </>}
       <button type="button" aria-label="Уменьшить" onClick={() => setZoom(value => Math.max(.25, value / 1.3))}>−</button>
       <button type="button" title="Вписать в окно" onClick={() => { setZoom(1); setOffset({ x: 0, y: 0 }); }}>{Math.round(zoom * 100)}%</button>
       <button type="button" aria-label="Увеличить" onClick={() => setZoom(value => Math.min(10, value * 1.3))}>+</button>
-      <button type="button" onClick={onClose}>Закрыть ×</button>
+      <button type="button" className="scheme-viewer-close" aria-label="Закрыть просмотр" onClick={onClose}>×</button>
     </div>
-    <div className="scheme-viewer-canvas" onWheel={event => {
-      setZoom(value => Math.max(.25, Math.min(10, value * (event.deltaY > 0 ? .9 : 1.1))));
-    }} onPointerDown={event => {
-      if (event.button !== 0) return;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      drag.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y };
-    }} onPointerMove={event => {
-      if (drag.current) setOffset({ x: drag.current.ox + event.clientX - drag.current.x, y: drag.current.oy + event.clientY - drag.current.y });
-    }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
-      {/* Local attachments must retain their original bytes and size. */}
+    <div className="scheme-viewer-canvas" onClick={event => { if (event.target === event.currentTarget) onClose(); }}
+      onWheel={event => setZoom(value => Math.max(.25, Math.min(10, value * (event.deltaY > 0 ? .9 : 1.1))))}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={`${base}/images/${image.id}`} alt={image.note || image.name} draggable={false}
+        onPointerDown={event => {
+          if (event.button !== 0) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          drag.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y };
+        }} onPointerMove={event => {
+          if (drag.current) setOffset({ x: drag.current.ox + event.clientX - drag.current.x, y: drag.current.oy + event.clientY - drag.current.y });
+        }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}
         style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }} />
     </div>
     {image.note && <p className="scheme-viewer-note">{image.note}</p>}
@@ -123,21 +144,14 @@ export function ImageViewer({ image, base, onClose }: { image: ImageMaterial; ba
 export function DiagramMaterialPanel({ store, onNotice }: { store: MaterialStore; onNotice: (message: string) => void }) {
   const input = useRef<HTMLInputElement>(null);
   const [viewerId, setViewerId] = useState<string | null>(null);
-  const [dragging, setDragging] = useState(false);
+  const [movingId, setMovingId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const images = store.data?.images || [];
   const viewer = images.find(image => image.id === viewerId);
   async function upload(files: FileList | File[]) {
-    if (files.length + images.length > 5) { onNotice("В проекте можно сохранить до пяти схем"); return; }
     setUploading(true);
-    try {
-      for (const file of Array.from(files)) {
-        await store.mutate("/images", revision => {
-          const body = new FormData(); body.set("revision", String(revision)); body.set("file", file);
-          return { method: "POST", body };
-        });
-      }
-    } catch (reason) { onNotice(reason instanceof Error ? reason.message : "Не удалось загрузить картинку"); }
+    try { await uploadSchemes(store, files); }
+    catch (reason) { onNotice(reason instanceof Error ? reason.message : "Не удалось загрузить картинку"); }
     finally { setUploading(false); }
   }
   function update(change: (current: ImageMaterial[]) => ImageMaterial[]) {
@@ -146,48 +160,42 @@ export function DiagramMaterialPanel({ store, onNotice }: { store: MaterialStore
     })).catch(reason => onNotice(reason.message));
   }
   return <>
-    <div className="prompt-copy-actions material-actions">
-      <button type="button" disabled={!store.data || store.busy || uploading || images.length >= 5} onClick={() => input.current?.click()}>+ Добавить схемы</button>
-      <span className="material-counter">{images.length}/5 · <strong>PNG</strong>, JPEG, WebP · до 20 МБ</span>
-      <input ref={input} type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" multiple hidden onChange={event => {
-        if (event.target.files) void upload(event.target.files); event.target.value = "";
-      }} />
-    </div>
+    <input ref={input} type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" multiple hidden onChange={event => {
+      if (event.target.files) void upload(event.target.files); event.target.value = "";
+    }} />
+    <button type="button" className="scheme-add-zone" disabled={!store.data || uploading || store.busy} onClick={() => input.current?.click()}>+ Добавить схему</button>
     <SaveStatus store={store} />
-    <div className={`scheme-dropzone${dragging ? " dragging" : ""}`} onDragOver={event => { event.preventDefault(); setDragging(true); }}
-      onDragLeave={() => setDragging(false)} onDrop={event => {
-        event.preventDefault(); setDragging(false);
-        if (!uploading && !store.busy && store.data) void upload(event.dataTransfer.files);
-      }}>
-      {images.length === 0 ? <p>Перетащите сюда сохранённые схемы или нажмите «Добавить схемы».</p> :
-        <div className="scheme-grid">{images.map((image, index) => <article className="scheme-card" key={image.id}>
-          <div className="scheme-card-actions">
-            <span>Вариант {index + 1}</span>
-            <button type="button" aria-label={`Переместить вариант ${index + 1} раньше`} disabled={index === 0 || store.busy} onClick={() => {
-              update(current => { const next = [...current]; const i = next.findIndex(item => item.id === image.id);
-                if (i > 0) [next[i - 1], next[i]] = [next[i], next[i - 1]]; return next; });
-            }}>←</button>
-            <button type="button" aria-label={`Переместить вариант ${index + 1} позже`} disabled={index === images.length - 1 || store.busy} onClick={() => {
-              update(current => { const next = [...current]; const i = next.findIndex(item => item.id === image.id);
-                if (i >= 0 && i < next.length - 1) [next[i + 1], next[i]] = [next[i], next[i + 1]]; return next; });
-            }}>→</button>
-            <button type="button" title="Скачать схему" aria-label={`Скачать вариант ${index + 1}`} disabled={store.busy} onClick={() => {
-              void downloadArtifact(`${store.base}/images/${image.id}?download=true`, image.name).catch(reason => onNotice(reason.message));
-            }}>↓</button>
-            <button type="button" title="Удалить схему" aria-label={`Удалить вариант ${index + 1}`} disabled={store.busy} onClick={() => {
-              if (window.confirm(`Удалить вариант ${index + 1}?`)) update(current => current.filter(item => item.id !== image.id));
-            }}>×</button>
-          </div>
-          <button type="button" className="scheme-thumbnail" onClick={() => setViewerId(image.id)} aria-label={`Открыть вариант ${index + 1}`}>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={`${store.base}/images/${image.id}`} alt={image.name} />
-          </button>
-          <textarea aria-label={`Примечание: ${image.name}`} value={image.note} placeholder="Примечание к варианту…" maxLength={10000}
-            onChange={event => store.editNote(image.id, event.target.value)} onBlur={() => void store.flush()} />
-        </article>)}</div>}
-      {uploading && <p aria-live="polite">Загружаю схемы…</p>}
-    </div>
-    {viewer && <ImageViewer key={viewer.id} image={viewer} base={store.base} onClose={() => setViewerId(null)} />}
+    {(images.length > 0 || uploading) && <div className="scheme-dropzone">
+      <div className={`scheme-grid${images.length === 1 ? " single" : ""}`}>{images.map((image, index) => <article className={`scheme-card${movingId === image.id ? " moving" : ""}`} key={image.id}
+        onDragOver={event => { if (event.dataTransfer.types.includes("application/x-whisper-scheme")) event.preventDefault(); }}
+        onDrop={event => {
+          const source = event.dataTransfer.getData("application/x-whisper-scheme");
+          if (!source) return;
+          event.preventDefault(); event.stopPropagation(); setMovingId(null);
+          if (source === image.id) return;
+          update(current => {
+            const from = current.findIndex(item => item.id === source), to = current.findIndex(item => item.id === image.id);
+            if (from < 0 || to < 0) return current;
+            const next = [...current]; const [item] = next.splice(from, 1); next.splice(to, 0, item); return next;
+          });
+        }}>
+        <div className="scheme-card-actions"><span>{images.length > 1 ? `Вариант ${index + 1}` : ""}</span>
+          <button type="button" title="Удалить схему" aria-label={`Удалить вариант ${index + 1}`} disabled={store.busy} onClick={() => {
+            if (window.confirm(`Удалить схему?`)) update(current => current.filter(item => item.id !== image.id));
+          }}>×</button>
+        </div>
+        <button type="button" className="scheme-thumbnail" draggable={!store.busy} onClick={() => setViewerId(image.id)} aria-label={`Открыть вариант ${index + 1}`}
+          onDragStart={event => { event.dataTransfer.setData("application/x-whisper-scheme", image.id); event.dataTransfer.effectAllowed = "move"; setMovingId(image.id); }}
+          onDragEnd={() => setMovingId(null)}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={`${store.base}/images/${image.id}`} alt={image.name} draggable={false} />
+        </button>
+        <textarea rows={1} aria-label={`Примечание: ${image.name}`} value={image.note} placeholder="Примечание…" maxLength={10000}
+          onChange={event => store.editNote(image.id, event.target.value)} onBlur={() => void store.flush()} />
+      </article>)}</div>
+      {uploading && <p aria-live="polite">Загружаю…</p>}
+    </div>}
+    {viewer && <ImageViewer image={viewer} images={images} base={store.base} onNavigate={setViewerId} onClose={() => setViewerId(null)} />}
   </>;
 }
 
