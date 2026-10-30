@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from . import cancellation
 from .remote_api import router as remote_router
+from .materials_api import router as materials_router, batch_router as materials_batch_router
 from . import diarization as diarization_service
 from . import (
     components,
@@ -56,6 +57,8 @@ DiarizationEngine = Literal["pyannote", "nemotron"]
 
 app = FastAPI(title="Локальный Whisper API", version="2.0.0")
 app.include_router(remote_router)
+app.include_router(materials_router)
+app.include_router(materials_batch_router)
 app.add_middleware(
     CORSMiddleware,
     # Интерфейс живёт на 3000, но start.ps1 при занятом порте берёт следующий
@@ -129,6 +132,8 @@ class FolderPatch(BaseModel):
 
 
 class SettingsPatch(BaseModel):
+    materials_include_transcript: Literal["on", "off"] | None = None
+    materials_transcript_format: Literal["txt", "docx"] | None = None
     default_language: Literal["auto", "ru", "en"] | None = None
     default_quality: Literal["fast", "accurate"] | None = None
     default_timestamps: Literal["none", "segments", "words"] | None = None

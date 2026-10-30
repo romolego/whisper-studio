@@ -29,6 +29,10 @@ source only; models, recordings, credentials and runtime environments are ignore
 
 ## Maintaining source
 
+For project summaries, minutes, diagrams and batch artifact export, read
+`MATERIALS_API.md`. Agents should use the same revision-checked API as the UI,
+not edit artifact manifests directly or automate clicks for bulk operations.
+
 Respect the user's requested scope. Keep `data`, `models`, `vendor`, `bundle`,
 Python environments, recordings, cookies and tokens out of commits. Never force-add
 ignored runtime files. Public-repository changes must not contain personal data.

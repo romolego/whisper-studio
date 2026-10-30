@@ -2,6 +2,7 @@
 
 import RemoteComputeSettings from "./RemoteComputeSettings";
 import PromptTools from "./PromptTools";
+import MaterialsResults from "./MaterialsResults";
 
 import {
   ChangeEvent,
@@ -45,6 +46,8 @@ function pageSizeCount(value: PageSize) {
 }
 
 type Settings = {
+  materials_include_transcript: "on" | "off";
+  materials_transcript_format: "txt" | "docx";
   default_language: "ru" | "en" | "auto";
   default_quality: "fast" | "accurate";
   default_timestamps: "none" | "segments" | "words";
@@ -293,6 +296,7 @@ type StagedMedia = {
 };
 
 type Job = {
+  finished_at?: string | null;
   id: string;
   session_id: string;
   original_name: string;
@@ -457,6 +461,8 @@ type PendingRecording = {
 type RecordingStopMode = "save" | "discard" | "confirm";
 
 const initialSettings: Settings = {
+  materials_include_transcript: "on",
+  materials_transcript_format: "txt",
   default_language: "ru",
   default_quality: "accurate",
   default_timestamps: "segments",
@@ -1971,6 +1977,10 @@ export default function Home() {
         : "none"
       : "";
 
+  const transcriptSourceKey = JSON.stringify([activeProject?.updated_at, activeProject?.completed_count,
+    jobs.filter(job => job.session_id === activeProjectId).map(job =>
+      [job.id, job.status, job.position, job.finished_at, job.outputs.json, job.options])]);
+
   useEffect(() => {
     if (
       screen !== "project" ||
@@ -1994,6 +2004,7 @@ export default function Home() {
         return response.json() as Promise<SpeakerEntry[]>;
       })
       .then((nextSpeakers) => {
+        if (controller.signal.aborted) return;
         const available = new Set(nextSpeakers.map((speaker) => speaker.key));
         setProjectSpeakers(nextSpeakers);
         setSelectedSpeakerKeys((current) => {
@@ -2022,11 +2033,13 @@ export default function Home() {
     screen,
     activeProjectId,
     activeProject?.completed_count,
+    transcriptSourceKey,
   ]);
 
   const transcriptViewKey = JSON.stringify([
     screen, activeProjectId, viewTimestamps, viewFormatting, viewSpeakers,
     speakerFilterValue, speakerNamesSignature,
+    transcriptSourceKey,
   ]);
   const transcriptReady = !transcriptLoading && transcriptTextKey === transcriptViewKey;
 
@@ -2332,6 +2345,12 @@ export default function Home() {
   }, [filteredProjects, visibleFolders]);
 
   function openProject(projectId: string) {
+    setProjectSpeakers([]);
+    setSelectedSpeakerKeys(new Set());
+    speakerSelectionProjectRef.current = "";
+    knownSpeakerKeysRef.current = new Set();
+    setTranscriptText("");
+    setTranscriptTextKey("");
     setActiveProjectId(projectId);
     setScreen("project");
     setFiles([]);
@@ -4618,6 +4637,13 @@ export default function Home() {
         )}
         <div className="queue-bar">
           <PromptTools
+            key={screen === "project" ? activeProjectId : "global"}
+            api={API}
+            projectId={screen === "project" ? activeProjectId || undefined : undefined}
+            transcriptQuery={new URLSearchParams({ timestamps: viewTimestamps, formatting: viewFormatting, speakers: viewSpeakers,
+              ...(speakerFilterValue ? { speaker_keys: speakerFilterValue } : {}) }).toString()}
+            defaultIncludeTranscript={settings.materials_include_transcript !== "off"}
+            transcriptFormat={settings.materials_transcript_format || "txt"}
             transcript={screen === "project" && activeProject?.completed_count
               ? transcriptReady ? transcriptText : ""
               : undefined}
@@ -5407,7 +5433,7 @@ export default function Home() {
                   </div>
                 )}
                 <div className="transcript-document">
-                  {transcriptLoading ? (
+                  {!transcriptReady ? (
                     <p className="transcript-loading">Готовлю вариант текста…</p>
                   ) : (
                     <pre>{transcriptText}</pre>
@@ -5415,6 +5441,8 @@ export default function Home() {
                 </div>
               </section>
             )}
+
+            <MaterialsResults key={activeProject.id} api={API} projectId={activeProject.id} onNotice={setNotice} />
 
             <section className="composer">
               <div className="section-title">
@@ -6928,6 +6956,19 @@ export default function Home() {
                     <option value="srt">SRT — субтитры</option>
                     <option value="vtt">VTT — веб-субтитры</option>
                     <option value="json">JSON — структурированные данные</option>
+                  </select>
+                </div>
+                <div className="setting-row">
+                  <div><strong>Транскрибация в пакете материалов</strong><p>Включать исходную транскрибацию при скачивании резюме, протокола и схем. Перед скачиванием галочку можно изменить.</p></div>
+                  <input type="checkbox" aria-label="Включать транскрибацию в пакет по умолчанию"
+                    checked={settings.materials_include_transcript !== "off"}
+                    onChange={event => saveSetting("materials_include_transcript", event.target.checked ? "on" : "off")} />
+                </div>
+                <div className="setting-row">
+                  <strong>Формат транскрибации в пакете</strong>
+                  <select aria-label="Формат транскрибации в пакете" value={settings.materials_transcript_format || "txt"}
+                    onChange={event => saveSetting("materials_transcript_format", event.target.value as "txt" | "docx")}>
+                    <option value="txt">TXT — обычный текст</option><option value="docx">DOCX — документ Word</option>
                   </select>
                 </div>
               </section>

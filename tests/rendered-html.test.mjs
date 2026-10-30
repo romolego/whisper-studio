@@ -35,7 +35,9 @@ test("server-renders the local Whisper shell", async () => {
 });
 
 test("prompt copying preserves the prompt and the exact current transcript", async () => {
-  const source = await readFile(new URL("../app/transcript-prompts.ts", import.meta.url), "utf8");
+  const prompts = await readFile(new URL("../app/transcript-prompts.json", import.meta.url), "utf8");
+  const source = (await readFile(new URL("../app/transcript-prompts.ts", import.meta.url), "utf8"))
+    .replace('import prompts from "./transcript-prompts.json";', `const prompts = ${prompts};`);
   const { transcriptPrompts, promptWithTranscript } = await import(
     `data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source)).toString("base64")}`
   );

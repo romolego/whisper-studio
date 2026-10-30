@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from .project_locks import project_lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,8 @@ DB_PATH = DATA_DIR / "whisper.db"
 PAGE_SIZE_VALUES: set[str] = {"10", "20", "50", "100", "500", "1000", "all"}
 
 DEFAULT_SETTINGS: dict[str, str] = {
+    "materials_include_transcript": "on",
+    "materials_transcript_format": "txt",
     "default_language": "ru",
     "default_quality": "accurate",
     "default_timestamps": "segments",
@@ -81,6 +84,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
 }
 
 SETTING_VALUES: dict[str, set[str]] = {
+    "materials_include_transcript": {"on", "off"},
+    "materials_transcript_format": {"txt", "docx"},
     "default_language": {"ru", "en", "auto"},
     "default_quality": {"fast", "accurate"},
     "default_timestamps": {"none", "segments", "words"},
@@ -131,9 +136,17 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=30)
+    connection = sqlite3.connect(DB_PATH, timeout=30, factory=_ClosingConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -937,6 +950,11 @@ def _rewrite_session_paths(session_id: str, old: Path, new: Path) -> None:
 
 
 def sync_session_dir(session_id: str) -> Path:
+    with project_lock(session_id):
+        return _sync_session_dir(session_id)
+
+
+def _sync_session_dir(session_id: str) -> Path:
     """Привести папку проекта в соответствие с его названием.
 
     Вызывается при создании, переименовании и по завершении распознавания.
@@ -1351,6 +1369,11 @@ def rename_session(session_id: str, name: str) -> dict[str, Any]:
 
 
 def delete_session(session_id: str) -> None:
+    with project_lock(session_id):
+        _delete_session(session_id)
+
+
+def _delete_session(session_id: str) -> None:
     path = session_dir(session_id).resolve()
     session = get_session(session_id)
     root = path.parent.resolve()
@@ -1610,6 +1633,7 @@ def set_speaker_alias(
                 """,
                 (job_id, speaker_id),
             )
+        db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (utc_now(), project_id))
 
 
 def _job_from_row(db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
