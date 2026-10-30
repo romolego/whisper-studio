@@ -19,4 +19,3 @@ export default function Hint({ text }: { text: string }) {
     </span>
   );
 }
-
