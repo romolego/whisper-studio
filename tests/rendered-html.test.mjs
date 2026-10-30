@@ -38,13 +38,20 @@ test("prompt copying preserves the prompt and the exact current transcript", asy
   const prompts = await readFile(new URL("../app/transcript-prompts.json", import.meta.url), "utf8");
   const source = (await readFile(new URL("../app/transcript-prompts.ts", import.meta.url), "utf8"))
     .replace('import prompts from "./transcript-prompts.json";', `const prompts = ${prompts};`);
-  const { transcriptPrompts, promptWithTranscript } = await import(
+  const { transcriptPrompts, promptWithTranscript, diagramWithMaterials } = await import(
     `data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source)).toString("base64")}`
   );
   assert.deepEqual(transcriptPrompts.map(p => p.label), ["Резюме", "Цифровой протокол", "Схема"]);
   const transcript = "СПИКЕР 2:\n[00:00:01.250] Привет!\n\n  Исходные пробелы.\n";
   for (const prompt of transcriptPrompts) {
     assert.equal(promptWithTranscript(prompt.text, transcript), `${prompt.text}\n\nТранскрибация:\n${transcript}`);
+  }
+  for (const [summary, minutes] of [["  Резюме\n", "Протокол"], ["Резюме", ""], ["", "Протокол"], [" \n", ""]]) {
+    const expected = ["Промпт"];
+    if (summary.trim()) expected.push(`Резюме:\n${summary}`);
+    if (minutes.trim()) expected.push(`Цифровой протокол:\n${minutes}`);
+    expected.push(`Исходная транскрибация:\n${transcript}`);
+    assert.equal(diagramWithMaterials("Промпт", transcript, summary, minutes), expected.join("\n\n---\n\n"));
   }
 });
 

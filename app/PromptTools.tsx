@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { promptWithTranscript, transcriptPrompts } from "./transcript-prompts";
+import { diagramWithMaterials, promptWithTranscript, transcriptPrompts } from "./transcript-prompts";
+import type { Materials } from "./useProjectMaterials";
 import { useProjectMaterials } from "./useProjectMaterials";
 import { DiagramMaterialPanel, PackagePanel, TextMaterialPanel } from "./MaterialPanels";
 
@@ -26,6 +27,8 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
   const [copying, setCopying] = useState(false);
   const root = useRef<HTMLElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   function cancelClose() {
     if (closeTimer.current) clearTimeout(closeTimer.current);
@@ -59,7 +62,7 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
     };
   }, [open, flushMaterials]);
 
-  async function copy(text: string, withTranscript: boolean) {
+  async function copy(text: string, withTranscript: boolean, success?: string) {
     setCopying(true);
     try {
       let copied = false;
@@ -82,7 +85,7 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
         try { copied = document.execCommand("copy"); } finally { area.remove(); }
       }
       onNotice(copied
-        ? withTranscript ? "Промпт с текущей транскрибацией скопирован" : "Промпт скопирован"
+        ? success || (withTranscript ? "Промпт с текущей транскрибацией скопирован" : "Промпт скопирован")
         : "Браузер запретил доступ к буферу обмена");
     } catch {
       onNotice("Не удалось скопировать текст в буфер обмена");
@@ -152,6 +155,26 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
                       Промпт + транскрибация
                     </button>
                   )}
+                  {prompt.id === "diagram" && transcript !== undefined && store.data &&
+                    (store.data.summary.trim() || store.data.minutes.trim()) && <button type="button"
+                      disabled={copying || store.busy || transcriptLoading || !transcript.trim()}
+                      title="Промпт, заполненные резюме и протокол, затем текущая транскрибация"
+                      onClick={() => {
+                        const text = transcript;
+                        setCopying(true);
+                        void (async () => {
+                          try {
+                            await store.ready();
+                            const response = await fetch(store.base, { cache: "no-store" });
+                            if (!response.ok) throw new Error("Не удалось получить сохранённые материалы");
+                            const material = await response.json() as Materials;
+                            if (alive.current) await copy(diagramWithMaterials(prompt.text, text, material.summary, material.minutes), true,
+                              "Промпт для схемы со всеми материалами скопирован");
+                          } catch (reason) {
+                            if (alive.current) onNotice(reason instanceof Error ? reason.message : "Не удалось скопировать материалы");
+                          } finally { if (alive.current) setCopying(false); }
+                        })();
+                      }}>Промпт + все материалы</button>}
                 </div>
                 <pre className="prompt-content" tabIndex={0}>{prompt.text}</pre>
                 </>}

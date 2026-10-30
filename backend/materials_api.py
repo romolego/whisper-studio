@@ -32,15 +32,29 @@ def prompt_input(project_id: str, kind: Literal["summary", "minutes", "diagram"]
                  include_transcript: bool = True,
                  timestamps: Literal["none", "segments", "words"] = "none",
                  formatting: Literal["formatted", "plain"] = "formatted",
-                 speakers: Literal["off", "on"] = "off", speaker_keys: str | None = None):
+                 speakers: Literal["off", "on"] = "off", speaker_keys: str | None = None,
+                 include_materials: bool = False):
     _call(storage.get_session, project_id)
     prompt = next(item for item in prompts() if item["id"] == kind)
     text = (_call(exporter.combined_text, project_id, timestamps, formatting, speakers,
                   exporter.parse_speaker_keys(speaker_keys)) if include_transcript else "")
     if include_transcript and not text.strip():
         raise HTTPException(409, "В проекте пока нет готовой транскрибации в выбранном виде")
-    return {"project_id": project_id, "kind": kind, "prompt": prompt["text"],
-            "transcript": text, "input": prompt["text"] + ("\n\nТранскрибация:\n" + text if include_transcript else "")}
+    result = {"project_id": project_id, "kind": kind, "prompt": prompt["text"],
+              "transcript": text, "input": prompt["text"] + ("\n\nТранскрибация:\n" + text if include_transcript else "")}
+    if include_materials:
+        if kind != "diagram":
+            raise HTTPException(422, "Материалы добавляются к промпту схемы")
+        data = _call(materials.get, project_id)
+        blocks = [prompt["text"]]
+        if data["summary"].strip():
+            blocks.append("Резюме:\n" + data["summary"])
+        if data["minutes"].strip():
+            blocks.append("Цифровой протокол:\n" + data["minutes"])
+        if include_transcript:
+            blocks.append("Исходная транскрибация:\n" + text)
+        result.update(input="\n\n---\n\n".join(blocks), summary=data["summary"], minutes=data["minutes"], materials_revision=data["revision"])
+    return result
 
 
 @batch_router.get("/materials/status")

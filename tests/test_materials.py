@@ -165,6 +165,19 @@ class MaterialsTests(unittest.TestCase):
         self.assertEqual(result["input"], source[0]["text"] + "\n\nТранскрибация:\n  Текст\n")
         self.assertEqual(materials_api.prompt_input(self.project, "summary", False)["input"], source[0]["text"])
 
+    def test_diagram_prompt_adds_only_existing_materials_before_transcript(self):
+        materials.save_text(self.project, "summary", "Резюме\n", 0)
+        materials.save_text(self.project, "minutes", "Протокол", 1)
+        with patch.object(materials_api.exporter, "combined_text", return_value="  Текущий текст\n"):
+            result = materials_api.prompt_input(self.project, "diagram", include_materials=True)
+            self.assertEqual(result["input"], "\n\n---\n\n".join([result["prompt"], "Резюме:\nРезюме\n", "Цифровой протокол:\nПротокол", "Исходная транскрибация:\n  Текущий текст\n"]))
+            materials.save_text(self.project, "summary", "", 2)
+            result = materials_api.prompt_input(self.project, "diagram", include_materials=True)
+            self.assertNotIn("Резюме:\n", result["input"])
+            self.assertIn("Цифровой протокол:\nПротокол", result["input"])
+            unchanged = materials_api.prompt_input(self.project, "diagram")
+            self.assertEqual(unchanged["input"], unchanged["prompt"] + "\n\nТранскрибация:\n  Текущий текст\n")
+
     def test_agent_can_export_fifty_projects_with_files_and_zips(self):
         ids = [self.project] + [storage.create_session(f"Пакет {i}", self.folder["id"])["id"] for i in range(49)]
         for project_id in ids:
