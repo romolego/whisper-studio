@@ -3,6 +3,8 @@
 import RemoteComputeSettings from "./RemoteComputeSettings";
 import PromptTools from "./PromptTools";
 import MaterialsResults from "./MaterialsResults";
+import Hint from "./Hint";
+import { InlineEdits } from "./inline-edits";
 
 import {
   ChangeEvent,
@@ -724,25 +726,6 @@ function jobTrimLabel(options: JobOptions) {
  * втрое больше, чем есть. Здесь тот же текст живёт за знаком вопроса и
  * появляется на наведении и по фокусу с клавиатуры.
  */
-function Hint({ text }: { text: string }) {
-  return (
-    <span className="hint">
-      <button
-        type="button"
-        className="hint-mark"
-        aria-label={text}
-        // Подсказка не должна отправлять формы и не должна перехватывать
-        // клик по строке настройки.
-        onClick={(event) => event.stopPropagation()}
-      >
-        ?
-      </button>
-      <span className="hint-bubble" role="tooltip">
-        {text}
-      </span>
-    </span>
-  );
-}
 
 /* Выбор разметки спикеров: не разделять или разделять выбранным движком.
  *
@@ -1600,7 +1583,6 @@ export default function Home() {
     name: string;
   } | null>(null);
   const speakerDraftsRef = useRef(new Map<string, string>());
-  const speakerSavesRef = useRef(new Map<string, Promise<void>>());
   // id задач, по которым запрос на остановку уже отправлен, но ответ ещё не
   // пришёл: нужно, чтобы кнопка не позволяла нажать дважды.
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
@@ -1632,54 +1614,50 @@ export default function Home() {
   const speakerSampleRequestRef = useRef("");
   const knownSpeakerKeysRef = useRef<Set<string>>(new Set());
 
+  const inlineEdits = useRef(new InlineEdits());
+  const projectEditOriginal = useRef<Project | null>(null);
+  const folderEditOriginal = useRef<Folder | null>(null);
+  const historyEditOriginal = useRef<DictationMessage | null>(null);
+  const inlineState = useRef({ projectId: "", projectName: "", projectFolder: "", folderId: "", folderName: "", folderFeed: true, historyId: "", historyText: "" });
+  inlineState.current = { projectId: editingProjectId, projectName: projectNameDraft, projectFolder: projectFolderDraft,
+    folderId: editingFolderId, folderName: folderNameDraft, folderFeed: folderFeedDraft, historyId: editingHistoryId, historyText: historyTextDraft };
+  const commitInline = useRef<(finish?: boolean) => void>(() => {});
+  commitInline.current = (finish = true) => {
+    const project = projects.find(item => item.id === editingProjectId) || (activeProjectDetail?.id === editingProjectId ? activeProjectDetail : undefined) || (projectEditOriginal.current?.id === editingProjectId ? projectEditOriginal.current : undefined);
+    const folder = folders.find(item => item.id === editingFolderId) || (folderEditOriginal.current?.id === editingFolderId ? folderEditOriginal.current : undefined);
+    const history = dictations.find(item => item.id === editingHistoryId) || (historyEditOriginal.current?.id === editingHistoryId ? historyEditOriginal.current : undefined);
+    if (project) void saveProjectName(project, finish);
+    if (folder) void saveFolder(folder, finish);
+    if (history) void saveHistoryMessage(history, finish);
+    if (speakerEditRef.current) saveSpeakerName(speakerEditRef.current.speaker, finish);
+  };
   useEffect(() => {
-    const hasInlineEditor = Boolean(
-      editingProjectId ||
-      editingFolderId ||
-      editingSpeakerKey ||
-      editingHistoryId,
-    );
-    if (!hasInlineEditor && !createOpen && !urlImportOpen) return;
-
-    const closeEditors = (event: PointerEvent) => {
-      const target = event.target as Element | null;
-      if (target?.closest("[data-inline-editor]")) return;
-      setEditingProjectId("");
-      setProjectNameDraft("");
-      setProjectFolderDraft("");
-      setEditingFolderId("");
-      setFolderNameDraft("");
-      setEditingHistoryId("");
-      setHistoryTextDraft("");
+    const outside = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || event.target.closest("[data-inline-editor]")) return;
+      commitInline.current();
     };
-    const closeOnEscape = (event: KeyboardEvent) => {
+    const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      setEditingProjectId("");
-      setProjectNameDraft("");
-      setProjectFolderDraft("");
-      setEditingFolderId("");
-      setFolderNameDraft("");
-      cancelSpeakerEdit();
-      setEditingHistoryId("");
-      setHistoryTextDraft("");
-      setCreateOpen(false);
-      setUrlImportOpen(false);
+      commitInline.current();
+      setCreateOpen(false); setUrlImportOpen(false);
     };
-
-    document.addEventListener("pointerdown", closeEditors);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeEditors);
-      document.removeEventListener("keydown", closeOnEscape);
+    const blur = (event: FocusEvent) => {
+      const editor = event.target instanceof Element ? event.target.closest("[data-inline-editor]") : null;
+      if (editor && !editor.contains(event.relatedTarget as Node | null)) commitInline.current();
     };
-  }, [
-    createOpen,
-    editingFolderId,
-    editingHistoryId,
-    editingProjectId,
-    editingSpeakerKey,
-    urlImportOpen,
-  ]);
+    const leaving = () => commitInline.current(false);
+    window.addEventListener("pagehide", leaving);
+    window.addEventListener("beforeunload", leaving);
+    document.addEventListener("focusout", blur);
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => { window.removeEventListener("pagehide", leaving); window.removeEventListener("beforeunload", leaving); document.removeEventListener("focusout", blur); document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
+  }, []);
+  useEffect(() => {
+    if (!editingProjectId && !editingFolderId && !editingHistoryId && !editingSpeakerKey) return;
+    const timer = setTimeout(() => commitInline.current(false), 650);
+    return () => clearTimeout(timer);
+  }, [editingProjectId, projectNameDraft, projectFolderDraft, editingFolderId, folderNameDraft, folderFeedDraft, editingHistoryId, historyTextDraft, editingSpeakerKey, speakerNameDraft]);
 
   const projectsPageSize =
     projectsPageSizeChoice || settings.projects_page_size;
@@ -2345,6 +2323,7 @@ export default function Home() {
   }, [filteredProjects, visibleFolders]);
 
   function openProject(projectId: string) {
+    commitInline.current();
     setProjectSpeakers([]);
     setSelectedSpeakerKeys(new Set());
     speakerSelectionProjectRef.current = "";
@@ -2856,19 +2835,16 @@ export default function Home() {
     await refresh();
   }
 
-  async function saveHistoryMessage(message: DictationMessage) {
-    const response = await fetch(`${API}/dictations/${message.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: historyTextDraft }),
-    });
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
-      return;
-    }
-    setEditingHistoryId("");
-    setNotice("Сообщение исправлено");
-    await refresh();
+  async function saveHistoryMessage(message: DictationMessage, finish = true) {
+    const draft = inlineState.current;
+    if (draft.historyId !== message.id) return;
+    try {
+      if (draft.historyText !== message.text || inlineEdits.current.draft(`${API}/dictations/${message.id}`)) {
+        const saved = await inlineEdits.current.save(`${API}/dictations/${message.id}`, { text: draft.historyText }, body => patchInline(`${API}/dictations/${message.id}`, body)) as DictationMessage;
+        setDictations(current => current.map(item => item.id === message.id ? saved : item));
+      }
+      if (finish && inlineState.current.historyId === message.id && inlineState.current.historyText === draft.historyText) setEditingHistoryId("");
+    } catch (error) { setNotice(`Не удалось сохранить сообщение: ${error instanceof Error ? error.message : "ошибка сети"}. Введённые изменения оставлены в черновике.`); }
   }
 
   function addFiles(incoming: FileList | File[]) {
@@ -3224,9 +3200,12 @@ export default function Home() {
   }
 
   function startProjectEdit(project: Project) {
+    commitInline.current();
+    projectEditOriginal.current = project;
+    const pending = inlineEdits.current.draft(`${API}/projects/${project.id}`);
     setEditingProjectId(project.id);
-    setProjectNameDraft(project.name);
-    setProjectFolderDraft(project.folder_id || "");
+    setProjectNameDraft(typeof pending?.name === "string" ? pending.name : project.name);
+    setProjectFolderDraft(typeof pending?.folder_id === "string" ? pending.folder_id : pending?.folder_id === null ? "" : project.folder_id || "");
   }
 
   function cancelProjectEdit() {
@@ -3235,27 +3214,27 @@ export default function Home() {
     setProjectFolderDraft("");
   }
 
-  async function saveProjectName(project: Project) {
-    const name = projectNameDraft.trim();
-    if (!name) {
-      setNotice("Название проекта не может быть пустым");
-      return;
-    }
-    const response = await fetch(`${API}/projects/${project.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        folder_id: projectFolderDraft || null,
-      }),
-    });
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
-      return;
-    }
-    cancelProjectEdit();
-    setNotice("Название проекта сохранено");
-    await refresh();
+  async function saveProjectName(project: Project, finish = true) {
+    const draft = inlineState.current;
+    if (draft.projectId !== project.id) return;
+    const name = draft.projectName.trim();
+    if (!name) { if (finish) setNotice("Название проекта не может быть пустым — введённый текст оставлен в поле"); return; }
+    const folder_id = draft.projectFolder || null;
+    try {
+      if (name !== project.name || folder_id !== project.folder_id || inlineEdits.current.draft(`${API}/projects/${project.id}`)) {
+        const saved = await inlineEdits.current.save(`${API}/projects/${project.id}`, { name, folder_id }, body => patchInline(`${API}/projects/${project.id}`, body)) as Project;
+        setProjects(current => current.map(item => item.id === project.id ? saved : item));
+        setActiveProjectDetail(current => current?.id === project.id ? saved : current);
+      }
+      const latest = inlineState.current;
+      if (finish && latest.projectId === project.id && latest.projectName === draft.projectName && latest.projectFolder === draft.projectFolder) cancelProjectEdit();
+    } catch (error) { setNotice(`Не удалось сохранить проект: ${error instanceof Error ? error.message : "ошибка сети"}. Введённые изменения оставлены в черновике.`); }
+  }
+
+  async function patchInline(url: string, body: Record<string, unknown>) {
+    const response = await fetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive: new TextEncoder().encode(JSON.stringify(body)).length < 55000 });
+    if (!response.ok) throw new Error(await errorMessage(response));
+    return response.json();
   }
 
   async function deleteProject(project: Project) {
@@ -3295,9 +3274,12 @@ export default function Home() {
   }
 
   function startFolderEdit(folder: Folder) {
+    commitInline.current();
+    folderEditOriginal.current = folder;
+    const pending = inlineEdits.current.draft(`${API}/folders/${folder.id}`);
     setEditingFolderId(folder.id);
-    setFolderNameDraft(folder.name);
-    setFolderFeedDraft(folder.feed_visible !== false);
+    setFolderNameDraft(typeof pending?.name === "string" ? pending.name : folder.name);
+    setFolderFeedDraft(typeof pending?.feed_visible === "boolean" ? pending.feed_visible : folder.feed_visible !== false);
   }
 
   function cancelFolderEdit() {
@@ -3306,31 +3288,19 @@ export default function Home() {
     setFolderFeedDraft(true);
   }
 
-  async function saveFolder(folder: Folder) {
-    const name = folderNameDraft.trim();
-    if (!name) {
-      setNotice("Название папки не может быть пустым");
-      return;
-    }
-    const feedChanged = folderFeedDraft !== (folder.feed_visible !== false);
-    const response = await fetch(`${API}/folders/${folder.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, feed_visible: folderFeedDraft }),
-    });
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
-      return;
-    }
-    cancelFolderEdit();
-    setNotice(
-      feedChanged
-        ? folderFeedDraft
-          ? "Папка снова в общей ленте"
-          : "Папка убрана из общей ленты — открыть её можно слева"
-        : "Название папки сохранено",
-    );
-    await refresh();
+  async function saveFolder(folder: Folder, finish = true) {
+    const draft = inlineState.current;
+    if (draft.folderId !== folder.id) return;
+    const name = draft.folderName.trim();
+    if (!name) { if (finish) setNotice("Название папки не может быть пустым — введённый текст оставлен в поле"); return; }
+    try {
+      if (name !== folder.name || draft.folderFeed !== (folder.feed_visible !== false) || inlineEdits.current.draft(`${API}/folders/${folder.id}`)) {
+        const saved = await inlineEdits.current.save(`${API}/folders/${folder.id}`, { name, feed_visible: draft.folderFeed }, body => patchInline(`${API}/folders/${folder.id}`, body)) as Folder;
+        setFolders(current => current.map(item => item.id === folder.id ? saved : item));
+      }
+      const latest = inlineState.current;
+      if (finish && latest.folderId === folder.id && latest.folderName === draft.folderName && latest.folderFeed === draft.folderFeed) cancelFolderEdit();
+    } catch (error) { setNotice(`Не удалось сохранить папку: ${error instanceof Error ? error.message : "ошибка сети"}. Введённые изменения оставлены в черновике.`); }
   }
 
   async function deleteFolder(folder: Folder) {
@@ -4135,62 +4105,35 @@ export default function Home() {
   }
 
   function startSpeakerEdit(speaker: SpeakerEntry) {
+    commitInline.current();
     // Blur обычно уже сохранил предыдущее поле; этот вызов покрывает
     // переходы, при которых браузер не успел передать фокус.
     if (speakerEditRef.current) saveSpeakerName(speakerEditRef.current.speaker);
-    const name = speakerDraftsRef.current.get(speaker.key) ?? (speaker.custom_name || speaker.name);
+    const key = `${API}/projects/${activeProjectId}/speakers/${encodeURIComponent(speaker.job_id)}/${encodeURIComponent(speaker.speaker_id)}`;
+    const name = String(inlineEdits.current.draft(key)?.name ?? speakerDraftsRef.current.get(speaker.key) ?? (speaker.custom_name || speaker.name));
     speakerEditRef.current = { speaker, projectId: activeProjectId, name };
     setEditingSpeakerKey(speaker.key);
     setSpeakerNameDraft(name);
   }
 
-  function cancelSpeakerEdit() {
-    if (speakerEditRef.current) {
-      speakerDraftsRef.current.delete(speakerEditRef.current.speaker.key);
-    }
-    speakerEditRef.current = null;
-    setEditingSpeakerKey("");
-    setSpeakerNameDraft("");
-  }
-
-  function saveSpeakerName(speaker: SpeakerEntry) {
-    const edit = speakerEditRef.current;
-    if (!edit || edit.speaker.key !== speaker.key) return;
+  function saveSpeakerName(speaker: SpeakerEntry, finish = true) {
+    const current = speakerEditRef.current;
+    if (!current || current.speaker.key !== speaker.key) return;
+    const edit = { ...current };
     const name = edit.name.trim();
+    const key = `${API}/projects/${edit.projectId}/speakers/${encodeURIComponent(speaker.job_id)}/${encodeURIComponent(speaker.speaker_id)}`;
+    if (finish) {
+      speakerEditRef.current = null;
+      setEditingSpeakerKey(value => value === speaker.key ? "" : value);
+    }
+    if (name === (edit.speaker.custom_name || edit.speaker.name) && !inlineEdits.current.draft(key)) return;
     speakerDraftsRef.current.set(speaker.key, edit.name);
-    speakerEditRef.current = null;
-    setEditingSpeakerKey((current) => current === speaker.key ? "" : current);
-    // Снимок имени и проекта не зависит от уже открытого следующего поля.
-    // Последовательная запись одного спикера не даёт старому ответу затереть новый.
-    const previous = speakerSavesRef.current.get(speaker.key) ?? Promise.resolve();
-    const saving = previous.then(async () => {
-      try {
-        const response = await fetch(
-          `${API}/projects/${edit.projectId}/speakers/${encodeURIComponent(speaker.job_id)}/${encodeURIComponent(speaker.speaker_id)}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }),
-          },
-        );
-        if (!response.ok) throw new Error(await errorMessage(response));
-        const updated = (await response.json()) as SpeakerEntry;
-        setProjectSpeakers((current) =>
-          current.map((item) => (item.key === updated.key ? updated : item)),
-        );
-        if (speakerDraftsRef.current.get(speaker.key) === edit.name) {
-          speakerDraftsRef.current.delete(speaker.key);
-        }
-      } catch (error) {
-        setNotice(`Не удалось сохранить имя «${name}»: ${error instanceof Error ? error.message : "ошибка сети"}. Введённое имя сохранено в поле переименования — повторите попытку.`);
-      }
-    });
-    speakerSavesRef.current.set(speaker.key, saving);
-    void saving.finally(() => {
-      if (speakerSavesRef.current.get(speaker.key) === saving) {
-        speakerSavesRef.current.delete(speaker.key);
-      }
-    });
+    void inlineEdits.current.save(key, { name }, body => patchInline(key, body)).then(result => {
+      const updated = result as SpeakerEntry;
+      setProjectSpeakers(items => items.map(item => item.key === updated.key ? updated : item));
+      if (speakerEditRef.current?.speaker.key === speaker.key && speakerEditRef.current.name === edit.name) speakerEditRef.current.speaker = updated;
+      if (speakerDraftsRef.current.get(speaker.key) === edit.name) speakerDraftsRef.current.delete(speaker.key);
+    }).catch(error => setNotice(`Не удалось сохранить имя: ${error instanceof Error ? error.message : "ошибка сети"}. Введённые изменения оставлены в черновике.`));
   }
 
   async function activateDiarization() {
@@ -4292,6 +4235,7 @@ export default function Home() {
           .join(" ")}
         key={project.id}
         data-inline-editor={editing ? true : undefined}
+              onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) commitInline.current(); }}
         // В режиме выделения клик по карточке переключает отметку, а не
         // открывает проект: иначе выделять мышью было бы невозможно.
         onClick={() => {
@@ -4337,7 +4281,7 @@ export default function Home() {
               onChange={(event) => setProjectNameDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") saveProjectName(project);
-                if (event.key === "Escape") cancelProjectEdit();
+                if (event.key === "Escape") saveProjectName(project);
               }}
             />
           ) : (
@@ -4481,6 +4425,7 @@ export default function Home() {
                 className={`folder-nav-item ${editing ? "editing" : ""}`}
                 key={folder.id}
                 data-inline-editor={editing ? true : undefined}
+              onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) commitInline.current(); }}
               >
                 {editing ? (
                   <div className="folder-inline-editor">
@@ -4494,7 +4439,7 @@ export default function Home() {
                       }
                       onKeyDown={(event) => {
                         if (event.key === "Enter") saveFolder(folder);
-                        if (event.key === "Escape") cancelFolderEdit();
+                        if (event.key === "Escape") saveFolder(folder);
                       }}
                     />
                     {/* Галочка живёт здесь же, а не только в настройках:
@@ -5048,7 +4993,7 @@ export default function Home() {
               <div>
                 <div className="eyebrow">Проект</div>
                 {editingProjectId === activeProject.id ? (
-                  <div className="project-title-edit" data-inline-editor>
+                  <div className="project-title-edit" data-inline-editor onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) commitInline.current(); }}>
                     <input
                       autoFocus
                       value={projectNameDraft}
@@ -5061,7 +5006,7 @@ export default function Home() {
                         if (event.key === "Enter") {
                           saveProjectName(activeProject);
                         }
-                        if (event.key === "Escape") cancelProjectEdit();
+                        if (event.key === "Escape") saveProjectName(activeProject);
                       }}
                     />
                     <select
@@ -5353,7 +5298,7 @@ export default function Home() {
                                     saveSpeakerName(speaker);
                                   }
                                   if (event.key === "Escape") {
-                                    cancelSpeakerEdit();
+                                    saveSpeakerName(speaker);
                                   }
                                 }}
                               />
@@ -6455,8 +6400,10 @@ export default function Home() {
                           <button
                             type="button"
                             onClick={() => {
+                              commitInline.current();
+                              historyEditOriginal.current = message;
                               setEditingHistoryId(message.id);
-                              setHistoryTextDraft(message.text);
+                              setHistoryTextDraft(String(inlineEdits.current.draft(`${API}/dictations/${message.id}`)?.text ?? message.text));
                             }}
                           >
                             ✎
@@ -7806,6 +7753,7 @@ export default function Home() {
                           key={folder.id}
                           className={editing ? "editing" : ""}
                           data-inline-editor={editing ? true : undefined}
+              onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) commitInline.current(); }}
                         >
                           <span>⌑</span>
                           <div>
@@ -7822,7 +7770,7 @@ export default function Home() {
                                   if (event.key === "Enter") {
                                     saveFolder(folder);
                                   }
-                                  if (event.key === "Escape") cancelFolderEdit();
+                                  if (event.key === "Escape") saveFolder(folder);
                                 }}
                               />
                             ) : (

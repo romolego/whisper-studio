@@ -19,7 +19,8 @@ type Props = {
 export default function PromptTools({ transcript, transcriptLoading, onNotice, api = "http://127.0.0.1:8765/api", projectId,
   transcriptQuery = "", defaultIncludeTranscript = true, transcriptFormat = "txt" }: Props) {
   const [open, setOpen] = useState<string | null>(null);
-  const [tab, setTab] = useState<"prompt" | "saved">("prompt");
+  const [tabs, setTabs] = useState<Record<string, "prompt" | "saved">>({});
+  const tab = tabs[open || ""] || "prompt";
   const store = useProjectMaterials(api, projectId);
   const flushMaterials = store.flush;
   const [copying, setCopying] = useState(false);
@@ -128,8 +129,8 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
               <section className={`prompt-popover${tab === "saved" && projectId ? " material-popover" : ""}`} id={`prompt-${prompt.id}`} role="dialog" aria-label={prompt.title}>
                 <strong className="prompt-title">{prompt.title}</strong>
                 {projectId && <div className="material-tabs" role="tablist" aria-label="Содержимое раздела">
-                  <button type="button" role="tab" aria-selected={tab === "prompt"} onClick={() => { void store.flush(); setTab("prompt"); }}>Промпт</button>
-                  <button type="button" role="tab" aria-selected={tab === "saved"} onClick={() => setTab("saved")}>Сохранённое</button>
+                  <button type="button" role="tab" aria-selected={tab === "prompt"} onClick={() => { void store.flush(); setTabs(current => ({ ...current, [prompt.id]: "prompt" })); }}>Промпт</button>
+                  <button type="button" role="tab" aria-selected={tab === "saved"} onClick={() => setTabs(current => ({ ...current, [prompt.id]: "saved" }))}>Сохранённое</button>
                 </div>}
                 {tab === "saved" && projectId ? (prompt.id === "diagram"
                   ? <DiagramMaterialPanel store={store} onNotice={onNotice} />

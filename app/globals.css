@@ -607,11 +607,24 @@ a {
 .material-actions { align-items: center; margin-bottom: 5px; }
 .material-editor { display: block; width: 100%; min-height: 210px; height: min(310px, calc(100dvh - 305px)); resize: vertical; border: 1px solid var(--line-strong); border-radius: 6px; padding: 10px; background: var(--panel); color: var(--ink); font: inherit; font-size: 12px; line-height: 1.6; }
 .material-text { min-height: 80px; max-height: min(310px, calc(100dvh - 305px)); }
+.material-markdown { white-space: normal; }
+.material-markdown > :first-child { margin-top: 0; }
+.material-markdown h1 { font-size: 18px; line-height: 1.35; margin: 15px 0 10px; }
+.material-markdown h2 { font-size: 16px; line-height: 1.4; margin: 14px 0 9px; }
+.material-markdown h3, .material-markdown h4 { font-size: 14px; margin: 12px 0 8px; }
+.material-markdown p { margin: 8px 0; }
+.material-markdown ul, .material-markdown ol { padding-left: 22px; margin: 8px 0; }
+.material-markdown ul { list-style: disc; }
+.material-markdown ol { list-style: decimal; }
+.material-markdown blockquote { border-left: 3px solid var(--line-strong); padding-left: 12px; margin: 10px 0; color: var(--muted); }
+.material-markdown table { border-collapse: collapse; font-size: 11px; display: block; overflow-x: auto; }
+.material-markdown th, .material-markdown td { padding: 5px 8px; border: 1px solid var(--line); }
+.material-markdown pre { white-space: pre-wrap; background: var(--panel-soft); padding: 8px; border-radius: 5px; }
+.material-markdown a { color: var(--accent); text-decoration: underline; }
 .material-save-status { display: flex; flex-wrap: wrap; gap: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; margin: 5px 0 8px; }
 .material-save-status [role="alert"] { color: #b34432; flex-basis: 100%; }
 .material-save-status button { background: var(--panel-soft); border: 1px solid var(--line); color: var(--ink); border-radius: 4px; padding: 3px 6px; font: inherit; cursor: pointer; }
-.material-counter, .material-help { font-size: 10px; color: var(--muted); }
-.material-help { margin: 10px 0 0; line-height: 1.6; }
+.material-counter { font-size: 10px; color: var(--muted); }
 .material-include { display: flex; gap: 8px; align-items: center; font-size: 11px; }
 .scheme-dropzone { border: 1px dashed var(--line-strong); padding: 9px; border-radius: 7px; max-height: min(420px, calc(100dvh - 300px)); overflow: auto; overscroll-behavior: contain; }
 .scheme-dropzone > p { padding: 20px 8px; font-size: 12px; color: var(--muted); line-height: 1.6; }

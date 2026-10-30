@@ -49,3 +49,9 @@ Treat CPU and GPU as equally supported installation modes. Preserve automatic
 GPU use for existing installations that have no `data/runtime.json` preference.
 Do not run a fresh installation over the user's working runtime merely to test
 an installer change; use temporary, isolated environments and test doubles.
+
+Existing-entity editors must save on leaving edit mode (outside click, blur,
+navigation and Escape), as well as Enter or the checkmark. Never clear drafts
+from a global dismissal handler. Project/folder names, folder assignment and
+visibility, speaker aliases and dictation history share the inline save queue.
+Preserve failed drafts and test exit paths in the browser.

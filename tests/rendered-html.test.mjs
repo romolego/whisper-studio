@@ -411,7 +411,7 @@ test("protects integration folders and can hide them from the feed", async () =>
   assert.match(page, /Проекты сервисов в общей ленте/);
   // Та же настройка у отдельной папки — галочкой в её редакторе.
   assert.match(page, /Показывать в общей ленте/);
-  assert.match(page, /feed_visible: folderFeedDraft/);
+  assert.match(page, /feed_visible: draft\.folderFeed/);
   // У папки внешнего сервиса кнопки удаления быть не должно — в обоих списках.
   const guards = page.match(/\{!folder\.integration && \(/g) || [];
   assert.equal(guards.length, 2, "удаление должно быть закрыто в двух местах");

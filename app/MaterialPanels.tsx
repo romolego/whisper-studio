@@ -1,5 +1,8 @@
 "use client";
 
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import Hint from "./Hint";
 import { useEffect, useRef, useState } from "react";
 import type { ImageMaterial, TextKind, useProjectMaterials } from "./useProjectMaterials";
 
@@ -64,12 +67,12 @@ export function TextMaterialPanel({ kind, store, onNotice }: {
   return <>
     <div className="prompt-copy-actions material-actions">
       {editing ? <>
-        <button type="button" disabled={!store.data} onClick={() => void paste()}>Вставить</button>
+        <button type="button" disabled={!store.data} onClick={() => void paste()}><span aria-hidden="true">📋</span> Вставить</button>
         {text.trim() && <button type="button" title="Завершить редактирование" disabled={!store.data} onClick={() => {
           void store.ready().then(() => setEditing(false)).catch(reason => onNotice(reason.message));
         }}>✓ Готово</button>}
       </> : <button type="button" onClick={() => setEditing(true)} title="Редактировать материал">✎ Исправить</button>}
-      {text.trim() && (["docx", "txt"] as const).map(extension => <button type="button" key={extension}
+      {!editing && text.trim() && (["docx", "txt"] as const).map(extension => <button type="button" key={extension}
         disabled={store.busy} onClick={() => {
           void store.ready().then(() => downloadArtifact(`${store.base}/text/${kind}/${extension}`, `${label}.${extension}`))
             .catch(reason => onNotice(reason.message));
@@ -79,7 +82,7 @@ export function TextMaterialPanel({ kind, store, onNotice }: {
     {editing ? <textarea ref={area} className="material-editor" aria-label={`${label}: сохранённый текст`}
       value={text} disabled={!store.data} placeholder={`Вставьте сюда ${kind === "summary" ? "резюме" : "протокол"} из нейросети…`}
       maxLength={2000000} onChange={event => store.edit(kind, event.target.value)} onBlur={() => void store.flush()} />
-      : <pre className="prompt-content material-text" tabIndex={0}>{text || "Материал пока не добавлен"}</pre>}
+      : <div className="prompt-content material-text material-markdown" tabIndex={0}><Markdown remarkPlugins={[remarkGfm]}>{text || "Материал пока не добавлен"}</Markdown></div>}
   </>;
 }
 
@@ -216,14 +219,13 @@ export function PackagePanel({ store, query, defaultInclude, transcriptFormat, o
     finally { setDownloading(false); }
   }
   return <>
-    <strong className="prompt-title">Скачать материалы проекта</strong>
+    <strong className="prompt-title">Скачать материалы проекта <Hint text="Резюме и протокол — Word, схемы — в исходном формате. Транскрибация — с текущими настройками просмотра." /></strong>
     <div className="prompt-copy-actions">
       <button type="button" disabled={downloading || store.busy} onClick={() => void run(false)}>↓ По отдельным файлам</button>
       <button type="button" disabled={downloading || store.busy} onClick={() => void run(true)}>↓ ZIP</button>
     </div>
     <label className="material-include"><input type="checkbox" checked={include} onChange={event => setInclude(event.target.checked)} />
       Включить исходную транскрибацию ({transcriptFormat.toUpperCase()})</label>
-    <p className="material-help">Резюме и протокол — Word, схемы — в исходном формате. Транскрибация — с текущими настройками просмотра.</p>
     <SaveStatus store={store} />
   </>;
 }
