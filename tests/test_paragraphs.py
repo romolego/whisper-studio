@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -233,6 +235,97 @@ class ProjectFilesTests(unittest.TestCase):
             mine.write_text("моё", encoding="utf-8")
             self._run(folder)
             self.assertTrue(mine.is_file())
+
+    def test_partial_auto_export_write_preserves_previous_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder:
+            previous = self._run(folder)
+            target = next(path for path in previous if path.suffix == ".docx")
+            original = target.read_bytes()
+
+            def fail_mid_write(title, text, path):
+                path.write_bytes(b"incomplete Word file")
+                raise OSError("disk full")
+
+            with patch.object(exporter, "write_docx", side_effect=fail_mid_write):
+                written = self._run(folder)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual({path.suffix for path in written}, {".md", ".txt"})
+            self.assertEqual(set(Path(folder).iterdir()), set(previous))
+
+    def test_failed_auto_export_replace_preserves_previous_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder:
+            previous = self._run(folder)
+            original = {path: path.read_bytes() for path in previous}
+            with patch.object(exporter.os, "replace", side_effect=PermissionError("file is open")):
+                self.assertEqual(self._run(folder), [])
+            self.assertEqual({path: path.read_bytes() for path in previous}, original)
+            self.assertEqual(set(Path(folder).iterdir()), set(previous))
+
+    def test_renamed_auto_export_keeps_old_format_until_replacement_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder:
+            previous = self._run(folder, "Старое имя")
+            old_docx = next(path for path in previous if path.suffix == ".docx")
+            original = old_docx.read_bytes()
+            with patch.object(exporter, "write_docx", side_effect=OSError("write failed")):
+                written = self._run(folder, "Новое имя")
+            self.assertEqual(old_docx.read_bytes(), original)
+            self.assertEqual(set(Path(folder).iterdir()), {*written, old_docx})
+
+            retried = self._run(folder, "Новое имя")
+            self.assertEqual({path.suffix for path in retried}, {".md", ".txt", ".docx"})
+            self.assertFalse(old_docx.exists())
+            self.assertEqual(set(Path(folder).iterdir()), set(retried))
+
+    def test_concurrent_auto_export_cannot_restore_an_older_snapshot(self) -> None:
+        first_ready, release_first = threading.Event(), threading.Event()
+        second_started, second_read = threading.Event(), threading.Event()
+        first_thread = [None]
+
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder:
+            def payload(project_id):
+                if threading.get_ident() == first_thread[0]:
+                    return self._payload("Старое имя")
+                second_read.set()
+                return self._payload("Новое имя")
+
+            def directory(project_id):
+                if threading.get_ident() == first_thread[0]:
+                    first_ready.set()
+                    self.assertTrue(release_first.wait(10))
+                return Path(folder)
+
+            def first_export():
+                first_thread[0] = threading.get_ident()
+                return exporter.refresh_project_files("project-1")
+
+            def second_export():
+                second_started.set()
+                return exporter.refresh_project_files("project-1")
+
+            with patch.object(exporter, "_project_payload", side_effect=payload), patch.object(
+                exporter.storage, "session_dir", side_effect=directory
+            ), patch.object(exporter.storage, "list_speaker_aliases", return_value={}), patch.object(
+                exporter.storage, "get_settings", return_value={}
+            ), ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(first_export)
+                self.assertTrue(first_ready.wait(10))
+                second = pool.submit(second_export)
+                try:
+                    self.assertTrue(second_started.wait(10))
+                    self.assertFalse(second_read.wait(0.2))
+                finally:
+                    release_first.set()
+                old_files, new_files = first.result(10), second.result(10)
+
+            self.assertEqual(len(new_files), 3)
+            self.assertEqual(set(Path(folder).iterdir()), set(new_files))
+            self.assertFalse(any(path.exists() for path in old_files))
+
+    def test_auto_export_reuses_the_project_lock(self) -> None:
+        with tempfile.TemporaryDirectory(dir=exporter.storage.ROOT) as folder:
+            # Callers already holding a project operation may refresh its files.
+            with exporter.project_lock("project-1"):
+                self.assertEqual(len(self._run(folder)), 3)
 
     def test_write_failure_never_fails_the_job(self) -> None:
         # Обновление вызывается сразу после того, как задание объявлено

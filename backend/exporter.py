@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
 from docx import Document
 
 from . import hallucinations, paragraphs, storage
+from .project_locks import project_lock
 
 logger = logging.getLogger("whisper.exporter")
 
@@ -427,7 +430,8 @@ def refresh_project_files(project_id: str) -> list[Path]:
     Что не удалось записать — просто не попадает в ответ.
     """
     try:
-        return _write_project_files(project_id)
+        with project_lock(project_id):
+            return _write_project_files(project_id)
     except Exception:
         # Обновление вызывается сразу после того, как задание объявлено
         # готовым, и стоит внутри общего `except` распознавателя. Без этой
@@ -471,18 +475,25 @@ def _write_project_files(project_id: str) -> list[Path]:
     written: list[Path] = []
     for kind in AUTO_EXPORT_KINDS:
         target = directory / f"{base}.{kind}"
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
             if kind == "md":
-                target.write_text(
+                temporary.write_text(
                     f"# {project['name']}\n\n{rendered['markdown']}\n",
                     encoding="utf-8",
                 )
             elif kind == "txt":
-                target.write_text(rendered["text"] + "\n", encoding="utf-8")
+                temporary.write_text(rendered["text"] + "\n", encoding="utf-8")
             else:
-                write_docx(project["name"], rendered["text"], target)
+                write_docx(project["name"], rendered["text"], temporary)
+            os.replace(temporary, target)
         except OSError:
             continue
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove partial project export: %s", temporary)
         written.append(target)
     _drop_stale_project_files(directory, {item.name for item in written})
     return written
@@ -529,11 +540,12 @@ def _drop_stale_project_files(directory: Path, keep: set[str]) -> None:
         entries = list(directory.iterdir())
     except OSError:
         return
+    written_kinds = {Path(name).suffix[1:].lower() for name in keep}
     for item in entries:
         if (
             item.name not in keep
             and item.is_file()
-            and item.suffix[1:].lower() in AUTO_EXPORT_KINDS
+            and item.suffix[1:].lower() in written_kinds
             and item.stem.endswith(AUTO_EXPORT_SUFFIX)
         ):
             try:

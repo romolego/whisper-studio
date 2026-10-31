@@ -583,7 +583,9 @@ def _free_base(folder: Path, name: str) -> str:
     taken = {path.stem for path in _all_files(folder)}
     candidate = name
     index = 2
-    while candidate in taken:
+    # .part и разделённые дорожки тоже занимают имя: новую ссылку нельзя
+    # продолжать поверх файлов прежней загрузки.
+    while any(stem == candidate or stem.startswith(f"{candidate}.") for stem in taken):
         candidate = f"{name} ({index})"
         index += 1
     return candidate
@@ -774,6 +776,9 @@ def cancel(project_id: str) -> bool:
             return False
         thread = _THREADS.get(project_id)
         if not thread or not thread.is_alive():
+            # Пауза допускает переименование проекта: storage переносит пути
+            # в сохранённом состоянии, а копия в памяти ещё может быть старой.
+            state = _load(project_id) or state
             _STATE[project_id] = state
             _cleanup_partial(state)
             _finish(project_id, state, "cancelled")
@@ -790,7 +795,8 @@ def resume(project_id: str) -> tuple[bool, str]:
         thread = _THREADS.get(project_id)
         if thread and thread.is_alive():
             return False, "Загрузка ещё не остановилась."
-        state = _STATE.get(project_id) or _load(project_id)
+        # Переименование проекта во время паузы меняет пути на диске.
+        state = _load(project_id) or _STATE.get(project_id)
         if not state:
             return False, "Сохранённая загрузка не найдена."
         if state.get("status") not in {"paused", "error", "interrupted"}:
@@ -1180,7 +1186,7 @@ def _cleanup_partial(state: dict[str, Any]) -> None:
     prefix = template.name.replace(".%(ext)s", "")
     if not directory.is_dir() or not prefix:
         return
-    for path in directory.glob(f"{prefix}*"):
+    for path in _siblings_named(directory, prefix):
         if path.is_file():
             try:
                 path.unlink()

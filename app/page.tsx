@@ -2629,7 +2629,9 @@ export default function Home() {
       setNotice(await errorMessage(response));
       return false;
     }
-    setDictationDirty(false);
+    if (loadedDictationRef.current === currentDictation.id && dictationTextRef.current === dictationText) {
+      setDictationDirty(false);
+    }
     return true;
   }
 
@@ -2684,6 +2686,7 @@ export default function Home() {
       return false;
     }
     const next = (await nextResponse.json()) as DictationMessage;
+    setDictations(current => [next, ...current.filter(item => item.id !== next.id)]);
     setActiveDictationId(next.id);
     // Сообщение ушло в историю: поле и отметки вписанных расшифровок начинают
     // новую диктовку с чистого листа.
@@ -2700,8 +2703,6 @@ export default function Home() {
       setNotice("Сообщение сохранено в истории");
     }
     await refresh();
-    setDictationText("");
-    setDictationDirty(false);
     return true;
   }
 
@@ -6393,7 +6394,7 @@ export default function Home() {
                         <div>
                           <button
                             type="button"
-                            onClick={() => copyDictationText(message.text, false)}
+                            onClick={() => copyDictationText(editingHistoryId === message.id ? historyTextDraft : message.text, false)}
                           >
                             ⧉ Копировать
                           </button>

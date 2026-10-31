@@ -62,6 +62,7 @@ class RemoteComputeTests(unittest.TestCase):
             patch.object(remote_host, "HOST_CONFIG", self.root / "host.json"),
             patch.object(storage, "temporary_dir", return_value=self.root),
             patch.object(transcriber, "RUSSIAN_MODEL_DIR", self.root / "model"),
+            patch.object(transcriber, "ENGLISH_MODEL_DIR", self.root / "model"),
             patch.object(transcriber, "_models", {}),
             patch.object(transcriber, "_model_devices", {}),
             patch.object(transcriber.runtime, "preferred_device", return_value="cpu"),

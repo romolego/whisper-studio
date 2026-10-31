@@ -87,8 +87,9 @@ export function TextMaterialPanel({ kind, store, onNotice }: {
 }
 
 export async function uploadSchemes(store: MaterialStore, files: FileList | File[]) {
+  const selected = Array.from(files);
   await store.refresh();
-  for (const file of Array.from(files)) {
+  for (const file of selected) {
     await store.mutate("/images", revision => {
       const body = new FormData(); body.set("revision", String(revision)); body.set("file", file);
       return { method: "POST", body };

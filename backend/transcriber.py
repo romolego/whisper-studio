@@ -656,7 +656,9 @@ def transcribe_job(job_id: str) -> None:
 
         clip_duration = _clip_duration(source_path, options)
         windows = longform.plan(clip_duration)
-        signature = longform.signature(source_path, options)
+        # Извлечённый WAV создаётся заново при повторе и получает новый mtime.
+        # Отпечаток исходника вместе с дорожкой/обрезкой сохраняет готовые окна.
+        signature = longform.signature(Path(job["stored_path"]), options)
         items: list[dict[str, Any]] = []
         device = "cpu"
         detected_language = forced_language or "unknown"

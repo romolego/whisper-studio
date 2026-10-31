@@ -5,6 +5,9 @@ import test from "node:test";
 
 const source = await readFile(new URL("../app/project-materials-store.ts", import.meta.url), "utf8");
 const { ProjectMaterialsStore, projectMaterialsStore } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source)).toString("base64")}`);
+const panelSource = await readFile(new URL("../app/MaterialPanels.tsx", import.meta.url), "utf8");
+const uploadSource = panelSource.slice(panelSource.indexOf("export async function uploadSchemes("), panelSource.indexOf("export function ImageViewer("));
+const { uploadSchemes } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(uploadSource)).toString("base64")}`);
 const empty = () => ({ revision: 0, summary: "", minutes: "", images: [], updated_at: null });
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -32,6 +35,26 @@ function fixture(t, initial = empty()) {
   t.after(() => store.flush());
   return { store, storage, calls, fetcher, setHandler: fn => { handler = fn; }, get server() { return server; }, set server(value) { server = value; } };
 }
+
+test("scheme picker snapshots selected files before refreshing and resetting the input", async () => {
+  const gate = deferred();
+  const selection = [new File(["first"], "first.png"), new File(["second"], "second.png")];
+  const uploaded = [];
+  const uploading = uploadSchemes({
+    refresh: () => gate.promise,
+    mutate: async (path, build) => {
+      assert.equal(path, "/images");
+      const request = build(uploaded.length);
+      assert.equal(request.method, "POST");
+      uploaded.push(request.body.get("file").name);
+    },
+  }, selection);
+  // Clearing the hidden input empties the live FileList while refresh is pending.
+  selection.length = 0;
+  gate.resolve();
+  await uploading;
+  assert.deepEqual(uploaded, ["first.png", "second.png"]);
+});
 
 test("project editors and readiness stay isolated", async t => {
   const a = fixture(t), b = fixture(t);

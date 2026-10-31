@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from backend import longform, storage, transcriber
 
@@ -89,6 +91,8 @@ class LongformPipelineTests(unittest.TestCase):
             "DATA_DIR": storage.DATA_DIR,
             "UPLOADS_DIR": storage.UPLOADS_DIR,
             "TEMP_DIR": storage.TEMP_DIR,
+            "DICTATIONS_DIR": storage.DICTATIONS_DIR,
+            "COOKIES_DIR": storage.COOKIES_DIR,
             "DEFAULTS": dict(storage.DEFAULT_SETTINGS),
             "_load_model": transcriber._load_model,
             "WINDOW_SECONDS": longform.WINDOW_SECONDS,
@@ -99,6 +103,9 @@ class LongformPipelineTests(unittest.TestCase):
         storage.DB_PATH = self._root / "test.db"
         storage.UPLOADS_DIR = self._root / "sessions"
         storage.TEMP_DIR = self._root / "temp"
+        storage.DICTATIONS_DIR = self._root / "dictations"
+        storage.COOKIES_DIR = self._root / "cookies"
+        self.enterContext(patch.object(transcriber.remote_client, "read_config", return_value={"mode": "local"}))
         storage.DEFAULT_SETTINGS["managed_storage_root"] = str(storage.UPLOADS_DIR)
         storage.DEFAULT_SETTINGS["temporary_storage_root"] = str(storage.TEMP_DIR)
         storage.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -114,7 +121,7 @@ class LongformPipelineTests(unittest.TestCase):
         transcriber._load_model = lambda language: (self.model, "cpu")
 
     def tearDown(self) -> None:
-        for key in ("DB_PATH", "DATA_DIR", "UPLOADS_DIR", "TEMP_DIR"):
+        for key in ("DB_PATH", "DATA_DIR", "UPLOADS_DIR", "TEMP_DIR", "DICTATIONS_DIR", "COOKIES_DIR"):
             setattr(storage, key, self._saved[key])
         storage.DEFAULT_SETTINGS.clear()
         storage.DEFAULT_SETTINGS.update(self._saved["DEFAULTS"])
@@ -221,6 +228,36 @@ class LongformPipelineTests(unittest.TestCase):
             "доделанный файл не должен оставлять чекпоинт",
         )
 
+    def test_restart_resumes_after_audio_is_extracted_again(self) -> None:
+        job = self._job(60)
+        storage.set_job_options(job["id"], {**job["options"], "audio_stream_index": 0})
+        extract = transcriber.extract_audio
+        extractions = 0
+
+        def extract_with_new_timestamp(source, stream, target, *args, **kwargs):
+            nonlocal extractions
+            extract(source, stream, target, *args, **kwargs)
+            if Path(source) == Path(job["stored_path"]):
+                extractions += 1
+                # Повторное извлечение меняет mtime даже при неизменном исходнике.
+                stamp = 1_700_000_000 + 10 * extractions
+                os.utime(target, (stamp, stamp))
+
+        with patch.object(transcriber, "extract_audio", side_effect=extract_with_new_timestamp):
+            self.model.fail_after = 2
+            transcriber.transcribe_job(job["id"])
+            self.assertEqual(storage.get_job(job["id"])["status"], "failed")
+            self.model.clips.clear()
+            self.model.fail_after = None
+            transcriber.transcribe_job(job["id"])
+
+        state = storage.get_job(job["id"])
+        self.assertEqual(state["status"], "completed", state.get("error"))
+        self.assertEqual(extractions, 2)
+        self.assertEqual(len(self.model.clips), 1, "готовые окна не должны считаться заново")
+        payload = json.loads(Path(state["outputs"]["json"]).read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["segments"]), 6)
+
     def test_short_file_keeps_the_single_pass(self) -> None:
         """Ниже порога — прежний путь: один вызов модели по всему файлу."""
         job = self._job(10)
@@ -230,6 +267,22 @@ class LongformPipelineTests(unittest.TestCase):
         self.assertEqual(len(self.model.clips), 1)
         self.assertAlmostEqual(self.model.clips[0], 10.0, places=0)
         self.assertFalse(longform._path(storage.get_job(job["id"])).exists())
+
+    def test_changed_source_does_not_resume_old_extracted_audio_checkpoint(self) -> None:
+        job = self._job(60)
+        storage.set_job_options(job["id"], {**job["options"], "audio_stream_index": 0})
+        self.model.fail_after = 2
+        transcriber.transcribe_job(job["id"])
+        self.assertEqual(storage.get_job(job["id"])["status"], "failed")
+        source = Path(job["stored_path"])
+        stamp = source.stat().st_mtime + 10
+        os.utime(source, (stamp, stamp))
+        self.model.clips.clear()
+        self.model.fail_after = None
+        transcriber.transcribe_job(job["id"])
+        state = storage.get_job(job["id"])
+        self.assertEqual(state["status"], "completed", state.get("error"))
+        self.assertEqual(len(self.model.clips), 3, "изменённый исходник требует нового распознавания")
 
     def test_temp_windows_do_not_pile_up(self) -> None:
         """Окна удаляются сразу: иначе суточный файл забил бы диск."""

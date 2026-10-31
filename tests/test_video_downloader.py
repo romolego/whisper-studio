@@ -10,6 +10,38 @@ from backend import video_downloader as downloader
 from backend import youtube_access
 
 
+class CancelCleanupTests(unittest.TestCase):
+    def test_new_download_does_not_reuse_an_existing_file_family(self) -> None:
+        for existing_name in ("recording.mp4", "recording.mp4.part", "recording.f137.mp4", "recording.notes.mp4"):
+            with self.subTest(existing=existing_name), tempfile.TemporaryDirectory() as directory:
+                folder = Path(directory)
+                (folder / existing_name).write_bytes(b"previous download")
+                self.assertEqual(downloader._free_base(folder, "recording"), "recording (2)")
+                self.assertEqual(downloader._free_base(folder, "other"), "other")
+
+    def test_cancel_keeps_files_with_a_similar_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            own = [folder / name for name in ("recording.mp4.part", "recording.f137.mp4", "recording.m4a.ytdl")]
+            other = [folder / name for name in ("recording-other.mp4", "recording (2).mp4")]
+            for path in own + other:
+                path.write_bytes(b"synthetic recording")
+            downloader._cleanup_partial({"out_template": str(folder / "recording.%(ext)s")})
+            self.assertTrue(all(path.exists() for path in other), "отмена не должна удалять соседние записи")
+            self.assertTrue(all(not path.exists() for path in own))
+
+    def test_cancel_treats_brackets_as_literal_filename_characters(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            own = folder / "recording [1].mp4.part"
+            other = folder / "recording 1.mp4"
+            for path in (own, other):
+                path.write_bytes(b"synthetic recording")
+            downloader._cleanup_partial({"out_template": str(folder / "recording [1].%(ext)s")})
+            self.assertTrue(other.exists())
+            self.assertFalse(own.exists())
+
+
 class ProviderTests(unittest.TestCase):
     def test_supported_hosts_are_explicit(self) -> None:
         cases = {
@@ -315,6 +347,45 @@ class DurableControlTests(unittest.TestCase):
                 downloader.get_status(self.project_id)["status"],
                 "cancelled",
             )
+
+    def _move_paused_download(self) -> tuple[Path, Path]:
+        media_dir = self.project_dir / "media"
+        media_dir.mkdir()
+        partial = media_dir / "recording.mp4.part"
+        partial.write_bytes(b"partial")
+        state = {
+            "project_id": self.project_id,
+            "status": "paused",
+            "out_template": str(media_dir / "recording.%(ext)s"),
+            "filename": str(partial),
+            "resumable": True,
+        }
+        with patch.object(downloader, "_job_path", return_value=self.job_path):
+            downloader._save(self.project_id, state)
+        downloader._STATE[self.project_id] = state
+        moved = self.root / "renamed-project"
+        self.project_dir.rename(moved)
+        downloader.storage._rewrite_download_state(moved, self.project_dir, moved)
+        return moved / "url_download.json", moved / "media" / partial.name
+
+    @patch.object(downloader, "_spawn")
+    def test_resume_after_project_rename_uses_moved_partial(self, spawn: MagicMock) -> None:
+        state_path, partial = self._move_paused_download()
+        with patch.object(downloader, "_job_path", return_value=state_path):
+            self.assertEqual(downloader.resume(self.project_id), (True, ""))
+        current = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(current["filename"], str(partial))
+        self.assertEqual(Path(current["out_template"]).parent, partial.parent)
+        self.assertEqual(partial.read_bytes(), b"partial")
+        spawn.assert_called_once_with(self.project_id)
+
+    def test_cancel_after_project_rename_removes_moved_partial(self) -> None:
+        state_path, partial = self._move_paused_download()
+        with patch.object(downloader, "_job_path", return_value=state_path):
+            self.assertTrue(downloader.cancel(self.project_id))
+        self.assertFalse(partial.exists())
+        current = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(current["status"], "cancelled")
 
 
 if __name__ == "__main__":
