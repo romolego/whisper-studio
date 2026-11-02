@@ -2,6 +2,7 @@
 
 import RemoteComputeSettings from "./RemoteComputeSettings";
 import PromptTools from "./PromptTools";
+import PromptSettings from "./PromptSettings";
 import MaterialsResults from "./MaterialsResults";
 import Hint from "./Hint";
 import { InlineEdits } from "./inline-edits";
@@ -2154,7 +2155,7 @@ export default function Home() {
    * сообщение диктовки. Обратно текст уходит отложенным PATCH-ем, и его ответ
    * на поле уже никак не влияет. */
   const dictationTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const dictationCaretRef = useRef<{ start: number; end: number } | null>(null);
+  const dictationAppendRef = useRef(false);
   const loadedDictationRef = useRef("");
   // Текст поля для асинхронных ответов: пока PATCH был в пути, человек мог
   // набрать ещё. Тогда снимать отметку «есть несохранённое» нельзя — иначе
@@ -2186,15 +2187,8 @@ export default function Home() {
     );
     if (!pending.length) return;
 
-    // Курсор мог стоять в середине набранного: дописывание в конец не должно
-    // его трогать. Позиция снимается до смены value и возвращается сразу после.
-    const field = dictationTextareaRef.current;
-    if (field && document.activeElement === field) {
-      dictationCaretRef.current = {
-        start: field.selectionStart,
-        end: field.selectionEnd,
-      };
-    }
+    // Новый фрагмент всегда дописывается вниз; после обновления покажем конец.
+    dictationAppendRef.current = true;
     // Пришедшая расшифровка — это и есть внешнее событие, ради которого поле
     // вообще связано с сервисом: другого способа дописать её в конец, не трогая
     // набранное руками, нет.
@@ -2220,12 +2214,12 @@ export default function Home() {
   ]);
 
   useBrowserLayoutEffect(() => {
-    const caret = dictationCaretRef.current;
-    if (!caret) return;
-    dictationCaretRef.current = null;
+    if (!dictationAppendRef.current) return;
+    dictationAppendRef.current = false;
     const field = dictationTextareaRef.current;
-    if (!field || document.activeElement !== field) return;
-    field.setSelectionRange(caret.start, caret.end);
+    if (!field) return;
+    if (document.activeElement === field) field.setSelectionRange(field.value.length, field.value.length);
+    field.scrollTop = field.scrollHeight;
   }, [dictationText]);
 
   useEffect(() => {
@@ -6522,6 +6516,7 @@ export default function Home() {
 
             <div className="settings-layout">
               <RemoteComputeSettings onChange={() => { void refresh(); }} />
+              <PromptSettings api={API} />
               <section className="settings-card">
                 <div className="settings-card-title">
                   <span>01</span>

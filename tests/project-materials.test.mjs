@@ -56,6 +56,43 @@ test("scheme picker snapshots selected files before refreshing and resetting the
   assert.deepEqual(uploaded, ["first.png", "second.png"]);
 });
 
+test("custom text shares the project revision and survives a lost acknowledgement", async t => {
+  const key = `custom_${"a".repeat(32)}`;
+  const f = fixture(t);
+  let once = true;
+  f.setHandler(async (url, options) => {
+    if (url.endsWith(`/text/${key}`)) {
+      const body = JSON.parse(options.body);
+      f.server = { ...f.server, revision: 1, texts: { [key]: body.text } };
+      if (once) { once = false; throw Error("lost acknowledgement"); }
+      return response(f.server);
+    }
+  });
+  await f.store.refresh();
+  f.store.edit(key, "Свой результат");
+  await f.store.flush();
+  assert.equal(f.store.getSnapshot().dirty, true);
+  assert.equal(f.store.getSnapshot().data.texts[key], "Свой результат");
+  await f.store.flush();
+  assert.equal(f.store.getSnapshot().dirty, false);
+  assert.equal(f.store.getSnapshot().persisted.texts[key], "Свой результат");
+});
+
+test("image group reordering preserves images and notes from other buttons", async () => {
+  const code = (await readFile(new URL("../app/useProjectMaterials.ts", import.meta.url), "utf8"));
+  const scopedSource = code.slice(code.indexOf("export function imageMaterialStore("));
+  const { imageMaterialStore } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(scopedSource)).toString("base64")}`);
+  const kind = `custom_${"b".repeat(32)}`;
+  const data = { ...empty(), images: [{ id:"base", note:"Keep" }, { id:"a", note:"A", prompt_id:kind }, { id:"b", note:"B", prompt_id:kind }] };
+  let sent;
+  const store = { data, persisted:data, mutate: async (path, build) => { sent = {path, body:JSON.parse(build(7,data).body)}; } };
+  const scoped = imageMaterialStore(store, kind);
+  assert.deepEqual(scoped.data.images.map(item => item.id), ["a","b"]);
+  await scoped.mutate("/images", (revision,current) => ({method:"PUT",body:JSON.stringify({revision,images:current.images.slice().reverse()})}));
+  assert.equal(sent.path, `/images?kind=${kind}`);
+  assert.deepEqual(sent.body, {revision:7, images:[{id:"base",note:"Keep"},{id:"b",note:"B"},{id:"a",note:"A"}]});
+});
+
 test("project editors and readiness stay isolated", async t => {
   const a = fixture(t), b = fixture(t);
   await Promise.all([a.store.refresh(), b.store.refresh()]);

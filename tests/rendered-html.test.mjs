@@ -300,8 +300,8 @@ test("keeps the dictation editor from fighting the typist", async () => {
   assert.match(page, /!dictationMergedIds\.has\(item\.id\)/);
   assert.match(page, /\$\{text\.trimEnd\(\)\}\\n\\n\$\{item\.text\}/);
 
-  // Позиция курсора переживает дописывание расшифровки.
-  assert.match(page, /field\.setSelectionRange\(caret\.start, caret\.end\)/);
+  // После нового фрагмента курсор и прокрутка переходят в конец.
+  assert.match(page, /field\.setSelectionRange\(field\.value\.length, field\.value\.length\)/);
 
   // Поле не блокируется на время распознавания.
   const editor = page.slice(page.indexOf('className="dictation-textarea"'));

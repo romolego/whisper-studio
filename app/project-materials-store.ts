@@ -1,7 +1,10 @@
 // Editors for one API/project share a queue, even across a quick leave/reopen.
-export type ImageMaterial = { id: string; name: string; file: string; note: string };
-export type Materials = { revision: number; summary: string; minutes: string; images: ImageMaterial[]; updated_at: string | null };
-export type TextKind = "summary" | "minutes";
+export type ImageMaterial = { id: string; name: string; file: string; note: string; prompt_id?: string };
+export type Materials = { revision: number; summary: string; minutes: string; images: ImageMaterial[]; updated_at: string | null; texts?: Record<string, string>; definitions?: Record<string, { label: string; type: "text" | "images" }> };
+export type TextKind = string;
+export function materialText(data: Materials | null, key: string): string {
+  return key === "summary" || key === "minutes" ? data?.[key] || "" : data?.texts?.[key] || "";
+}
 type Draft = { value: string; original: string | undefined };
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 type Options = { fetcher?: typeof fetch; storage?: () => DraftStorage; draftKey?: string; legacyDraftKey?: string; idle?: () => void };
@@ -9,9 +12,9 @@ export type MaterialSnapshot = { data: Materials | null; persisted: Materials | 
 export const EMPTY_MATERIALS: MaterialSnapshot = { data: null, persisted: null, error: "", busy: false, dirty: false, blocked: false };
 
 function original(data: Materials, key: string): string | undefined {
-  return key.startsWith("image:") ? data.images.find(image => image.id === key.slice(6))?.note : data[key as TextKind];
+  return key.startsWith("image:") ? data.images.find(image => image.id === key.slice(6))?.note : materialText(data, key);
 }
-function isDraftKey(key: string) { return key === "summary" || key === "minutes" || /^image:[a-f0-9]{32}$/.test(key); }
+function isDraftKey(key: string) { return key === "summary" || key === "minutes" || /^custom_[a-f0-9]{32}$/.test(key) || /^image:[a-f0-9]{32}$/.test(key); }
 function message(reason: unknown) { return reason instanceof Error ? reason.message : "Ошибка сохранения материалов"; }
 
 export class ProjectMaterialsStore {
@@ -44,6 +47,7 @@ export class ProjectMaterialsStore {
     const data = this.server ? { ...this.server,
       summary: this.pending.get("summary")?.value ?? this.server.summary,
       minutes: this.pending.get("minutes")?.value ?? this.server.minutes,
+      texts: { ...this.server.texts, ...Object.fromEntries([...this.pending].filter(([key]) => key.startsWith("custom_")).map(([key, draft]) => [key, draft.value])) },
       images: this.server.images.map(image => ({ ...image, note: this.pending.get(`image:${image.id}`)?.value ?? image.note })),
     } : null;
     this.state = { ...this.state, ...patch, data, persisted: this.server, dirty: this.pending.size > 0 };

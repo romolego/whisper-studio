@@ -6,6 +6,8 @@ import Hint from "./Hint";
 import { useEffect, useRef, useState } from "react";
 import type { ImageMaterial, TextKind, useProjectMaterials } from "./useProjectMaterials";
 
+import { materialText } from "./project-materials-store";
+
 export type MaterialStore = ReturnType<typeof useProjectMaterials>;
 
 export function saveBlob(name: string, blob: Blob) {
@@ -15,11 +17,15 @@ export function saveBlob(name: string, blob: Blob) {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
-export async function downloadArtifact(url: string, name: string) {
+export async function downloadArtifact(url: string, name: string, serverName = false) {
   const response = await fetch(url);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || "Не удалось скачать материал");
+  }
+  if (serverName) {
+    const encoded = response.headers.get("Content-Disposition")?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    if (encoded) { try { name = decodeURIComponent(encoded); } catch {} }
   }
   saveBlob(name, await response.blob());
 }
@@ -41,15 +47,15 @@ export function SaveStatus({ store }: { store: MaterialStore }) {
   </div>;
 }
 
-export function TextMaterialPanel({ kind, store, onNotice }: {
-  kind: TextKind; store: MaterialStore; onNotice: (message: string) => void;
+export function TextMaterialPanel({ kind, store, onNotice, label: customLabel }: {
+  label?: string; kind: TextKind; store: MaterialStore; onNotice: (message: string) => void;
 }) {
-  const text = store.data?.[kind] || "";
+  const text = materialText(store.data, kind);
   const [editing, setEditing] = useState(!text.trim());
   const area = useRef<HTMLTextAreaElement>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const label = kind === "summary" ? "Резюме" : "Протокол";
+  const label = customLabel || (kind === "summary" ? "Резюме" : kind === "minutes" ? "Протокол" : store.data?.definitions?.[kind]?.label || "Материал");
   async function paste() {
     try {
       const value = await navigator.clipboard.readText();
@@ -80,7 +86,7 @@ export function TextMaterialPanel({ kind, store, onNotice }: {
     </div>
     <SaveStatus store={store} />
     {editing ? <textarea ref={area} className="material-editor" aria-label={`${label}: сохранённый текст`}
-      value={text} disabled={!store.data} placeholder={`Вставьте сюда ${kind === "summary" ? "резюме" : "протокол"} из нейросети…`}
+      value={text} disabled={!store.data} placeholder={`Вставьте сюда ${label.toLowerCase()} из нейросети…`}
       maxLength={2000000} onChange={event => store.edit(kind, event.target.value)} onBlur={() => void store.flush()} />
       : <div className="prompt-content material-text material-markdown" tabIndex={0}><Markdown remarkPlugins={[remarkGfm]}>{text || "Материал пока не добавлен"}</Markdown></div>}
   </>;
@@ -212,7 +218,7 @@ export function PackagePanel({ store, query, defaultInclude, transcriptFormat, o
       const params = new URLSearchParams(query);
       params.set("include_transcript", String(include)); params.set("transcript_format", transcriptFormat);
       const url = `${store.base}/package/${zip ? "zip" : "files"}?${params}`;
-      if (zip) await downloadArtifact(url, "Материалы проекта.zip");
+      if (zip) await downloadArtifact(url, "Проект.zip", true);
       else {
         const response = await fetch(url);
         if (!response.ok) { const payload = await response.json(); throw new Error(payload.detail || "Ошибка скачивания"); }

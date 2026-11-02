@@ -19,7 +19,7 @@ from pathlib import Path
 import av
 from docx import Document
 
-from . import exporter, storage
+from . import exporter, storage, prompt_catalog
 from .project_locks import project_lock
 
 TEXT_KINDS = {"summary": "Резюме", "minutes": "Протокол"}
@@ -50,12 +50,27 @@ def _load(root: Path) -> dict:
                  and isinstance(data.get("images"), list))
         if not valid:
             raise ValueError("Invalid manifest")
+        data.setdefault("texts", {})
+        data.setdefault("definitions", {})
+        if (not isinstance(data["texts"], dict) or not isinstance(data["definitions"], dict)
+            or any(not re.fullmatch(prompt_catalog.CUSTOM_ID, key) or not isinstance(value, str)
+                   or len(value) > 2_000_000 for key, value in data["texts"].items())):
+            raise ValueError("Invalid custom text")
+        for key, definition in data["definitions"].items():
+            if (not re.fullmatch(prompt_catalog.CUSTOM_ID, key) or not isinstance(definition, dict)
+                or definition.get("type") not in {"text", "images"} or not isinstance(definition.get("label"), str) or not definition["label"].strip() or len(definition["label"]) > 120):
+                raise ValueError("Invalid material definition")
+        if any(key not in data["definitions"] or data["definitions"][key]["type"] != "text" for key in data["texts"]):
+            raise ValueError("Missing text definition")
         ids = set()
         for image in data["images"]:
             if (not isinstance(image, dict) or not re.fullmatch(r"[a-f0-9]{32}", str(image.get("id", "")))
                 or image["id"] in ids or image.get("file") not in {f"{image['id']}.{ext}" for ext in ("png", "jpg", "webp")}
                 or not isinstance(image.get("name"), str) or not isinstance(image.get("note"), str) or len(image["note"]) > 10000):
                 raise ValueError("Invalid image manifest")
+            group = image.get("prompt_id", "diagram")
+            if group != "diagram" and (group not in data["definitions"] or data["definitions"][group]["type"] != "images"):
+                raise ValueError("Invalid image group")
             ids.add(image["id"])
     except (ValueError, TypeError) as exc:
         raise InvalidState("Файл материалов повреждён или имеет неизвестную версию. Он оставлен без изменений.") from exc
@@ -120,16 +135,36 @@ def _docx(text: str, title: str | None = None) -> bytes:
     return output.getvalue()
 
 
+def _definition(data: dict, kind: str, expected: str) -> dict:
+    if kind in TEXT_KINDS and expected == "text":
+        return {"label": TEXT_KINDS[kind], "type": "text"}
+    if kind == "diagram" and expected == "images":
+        return {"label": "Схема", "type": "images"}
+    if not re.fullmatch(prompt_catalog.CUSTOM_ID, kind):
+        raise ValueError("Неизвестный вид материала")
+    try:
+        item = prompt_catalog.find(kind)
+    except KeyError:
+        item = data["definitions"].get(kind)
+    if not item or item["type"] != expected:
+        raise ValueError("Неизвестный вид материала")
+    return {"label": item["label"], "type": item["type"]}
+
+
 def save_text(project_id: str, kind: str, text: str, revision: int) -> dict:
-    if kind not in TEXT_KINDS or len(text) > 2_000_000:
+    if len(text) > 2_000_000:
         raise ValueError("Неизвестный материал или слишком длинный текст")
     with project_lock(project_id):
         root = _root(project_id)
         data = _load(root)
-        if data[kind] == text:
+        definition = _definition(data, kind, "text")
+        container = data if kind in TEXT_KINDS else data["texts"]
+        if container.get(kind, "") == text:
             return data  # Idempotent retry after a lost acknowledgement.
         _check(data, revision)
-        data[kind] = text
+        container[kind] = text
+        if kind not in TEXT_KINDS:
+            data["definitions"][kind] = definition
         contents = _text_files(kind, text)  # Render before changing anything.
         marker = root / ".exports-dirty"
         atomic_write(marker, b"1")
@@ -150,7 +185,8 @@ def save_text(project_id: str, kind: str, text: str, revision: int) -> dict:
 
 def _text_files(kind: str, text: str) -> dict[str, bytes | None]:
     contents = {"txt": text.encode("utf-8"), "docx": _docx(text)} if text.strip() else {}
-    return {f"{TEXT_KINDS[kind]}.{ext}": contents.get(ext) for ext in ("txt", "docx")}
+    base = TEXT_KINDS[kind] if kind in TEXT_KINDS else f"custom/{kind}/Текст"
+    return {f"{base}.{ext}": contents.get(ext) for ext in ("txt", "docx")}
 
 
 def _write_text_files(root: Path, contents: dict[str, bytes | None]) -> None:
@@ -166,6 +202,8 @@ def _recover_text_files(root: Path, data: dict) -> None:
     contents = {}
     for kind in TEXT_KINDS:
         contents.update(_text_files(kind, data[kind]))
+    for kind, text in data["texts"].items():
+        contents.update(_text_files(kind, text))
     _write_text_files(root, contents)
     _remove_generated(root / ".exports-dirty")
 
@@ -202,14 +240,17 @@ def _image_extension(content: bytes | Path) -> str:
     return extension
 
 
-def add_image(project_id: str, name: str, content: bytes | Path, revision: int) -> dict:
+def add_image(project_id: str, name: str, content: bytes | Path, revision: int, kind: str = "diagram") -> dict:
     if (isinstance(content, Path) and content.stat().st_size == 0) or (isinstance(content, bytes) and not content):
         raise ValueError("Файл картинки пуст")
     extension = _image_extension(content)
     with project_lock(project_id):
         root = _root(project_id)
         data = _load(root)
+        definition = _definition(data, kind, "images")
         _check(data, revision)
+        if kind != "diagram":
+            data["definitions"][kind] = definition
         image_id = uuid.uuid4().hex
         filename = f"{image_id}.{extension}"
         atomic_write(root / "images" / filename, content)
@@ -218,6 +259,8 @@ def add_image(project_id: str, name: str, content: bytes | Path, revision: int) 
         data["images"].append({"id": image_id, "file": filename,
                                "name": clean_name,
                                "note": ""})
+        if kind != "diagram":
+            data["images"][-1]["prompt_id"] = kind
         try:
             return _commit(root, data)
         except Exception:
@@ -260,12 +303,15 @@ def image_bytes(project_id: str, image_id: str) -> tuple[bytes, str, str]:
 
 
 def text_file(project_id: str, kind: str, extension: str) -> tuple[str, bytes]:
-    if kind not in TEXT_KINDS or extension not in {"txt", "docx"}:
+    if extension not in {"txt", "docx"}:
         raise ValueError("Неизвестный формат материала")
-    text = get(project_id)[kind]
+    data = get(project_id)
+    definition = _definition(data, kind, "text")
+    text = data[kind] if kind in TEXT_KINDS else data["texts"].get(kind, "")
     if not text.strip():
         raise ValueError("Материал ещё не заполнен")
-    return (f"{TEXT_KINDS[kind]}.{extension}", text.encode("utf-8") if extension == "txt"
+    label = TEXT_KINDS[kind] if kind in TEXT_KINDS else f"{storage.safe_file_name(definition['label'], fallback='Материал')} [{kind}]"
+    return (f"{label}.{extension}", text.encode("utf-8") if extension == "txt"
             else _docx(text))
 
 
@@ -277,10 +323,15 @@ def package_files(project_id: str, include_transcript: bool, transcript_format: 
     with project_lock(project_id):
         data = get(project_id)
         files = [text_file(project_id, kind, "docx") for kind in TEXT_KINDS if data[kind].strip()]
+        files.extend(text_file(project_id, kind, "docx") for kind, text in data["texts"].items() if text.strip())
         notes = []
+        group_counts = {}
         for index, image in enumerate(data["images"], 1):
             path, _ = image_file(project_id, image["id"])
-            name = f"Схема {index}{path.suffix}"
+            group = image.get("prompt_id", "diagram")
+            group_counts[group] = group_counts.get(group, 0) + 1
+            label = "Схема" if group == "diagram" else f"{storage.safe_file_name(data['definitions'][group]['label'], fallback='Схема')} [{group}]"
+            name = f"{label} {group_counts[group]}{path.suffix}"
             files.append((name, path.read_bytes()))
             if image["note"].strip():
                 notes.append(f"{name}: {image['note']}")

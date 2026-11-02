@@ -75,7 +75,7 @@ app.add_middleware(
     allow_headers=["*"],
     # Постраничные списки возвращают общее количество заголовком. Без явного
     # разрешения браузер его прячет, и пагинатор не знает, сколько страниц.
-    expose_headers=["X-Total-Count"],
+    expose_headers=["X-Total-Count", "Content-Disposition"],
 )
 
 logger = logging.getLogger("whisper.worker")

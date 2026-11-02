@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { diagramWithMaterials, promptWithTranscript, transcriptPrompts } from "./transcript-prompts";
+import { diagramWithMaterials, promptWithTranscript } from "./transcript-prompts";
 import type { Materials } from "./useProjectMaterials";
-import { useProjectMaterials } from "./useProjectMaterials";
+import { materialText } from "./project-materials-store";
+import { usePromptCatalog, promptTabKey } from "./prompt-catalog";
+import { useProjectMaterials, imageMaterialStore } from "./useProjectMaterials";
 import { uploadSchemes, DiagramMaterialPanel, PackagePanel, TextMaterialPanel } from "./MaterialPanels";
 
 type Props = {
@@ -19,9 +21,15 @@ type Props = {
 
 export default function PromptTools({ transcript, transcriptLoading, onNotice, api = "http://127.0.0.1:8765/api", projectId,
   transcriptQuery = "", defaultIncludeTranscript = true, transcriptFormat = "txt" }: Props) {
+  const catalog = usePromptCatalog(api);
   const [open, setOpen] = useState<string | null>(null);
   const [tabs, setTabs] = useState<Record<string, "prompt" | "saved">>({});
-  const tab = tabs[open || ""] || "prompt";
+  const tab = tabs[promptTabKey(api, projectId, open || "")] || "prompt";
+  function selectTab(id: string, value: "prompt" | "saved") {
+    const key = promptTabKey(api, projectId, id);
+    setTabs(current => ({ ...current, [key]: value }));
+    try { localStorage.setItem(key, value); } catch { /* Keep in-memory preference if storage is unavailable. */ }
+  }
   const store = useProjectMaterials(api, projectId);
   const flushMaterials = store.flush;
   const [copying, setCopying] = useState(false);
@@ -38,9 +46,14 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
   }
 
   function close() { if (draggingFiles.current || uploadingImages) return; setOpen(null); void store.flush(); }
-  function activate(id: string) { cancelClose(); setOpen(id); }
+  function activate(id: string) {
+    cancelClose();
+    const key = promptTabKey(api, projectId, id);
+    try { const saved = localStorage.getItem(key); if (saved === "prompt" || saved === "saved") setTabs(current => ({ ...current, [key]: saved })); } catch {}
+    setOpen(id);
+  }
   const saved = store.persisted;
-  const hasMaterials = !!saved && (!!saved.summary.trim() || !!saved.minutes.trim() || saved.images.length > 0);
+  const hasMaterials = !!saved && (!!saved.summary.trim() || !!saved.minutes.trim() || saved.images.length > 0 || Object.values(saved.texts || {}).some(text => text.trim()));
 
   useEffect(() => { if (store.error) onNotice(store.error); }, [store.error, onNotice]);
 
@@ -110,6 +123,7 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
     } finally { setCopying(false); }
   }
 
+  if (!catalog.enabled) return null;
   return (
     <nav
       ref={root}
@@ -131,19 +145,19 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
         if (!draggingFiles.current && !uploadingImages && event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) close();
       }}
     >
-      {transcriptPrompts.map((prompt) => (
-        <div className={`prompt-tool${prompt.id === "diagram" && receivingScheme ? " scheme-drag-target" : ""}`} key={prompt.id} onMouseEnter={() => activate(prompt.id)}
+      {catalog.prompts.filter(prompt => prompt.enabled).map((prompt) => (
+        <div className={`prompt-tool${prompt.type === "images" && open === prompt.id && receivingScheme ? " scheme-drag-target" : ""}`} key={prompt.id} onMouseEnter={() => activate(prompt.id)}
           onDragOver={event => {
-            if (prompt.id !== "diagram" || !projectId || !event.dataTransfer.types.includes("Files")) return;
+            if (prompt.type !== "images" || !projectId || !event.dataTransfer.types.includes("Files")) return;
             event.preventDefault(); event.dataTransfer.dropEffect = "copy";
-            draggingFiles.current = true; setReceivingScheme(true); cancelClose(); setOpen("diagram");
-            setTabs(current => ({ ...current, diagram: "saved" }));
+            draggingFiles.current = true; setReceivingScheme(true); cancelClose(); setOpen(prompt.id);
+            selectTab(prompt.id, "saved");
           }} onDrop={event => {
-            if (prompt.id !== "diagram" || !projectId || !event.dataTransfer.types.includes("Files")) return;
+            if (prompt.type !== "images" || !projectId || !event.dataTransfer.types.includes("Files")) return;
             event.preventDefault(); event.stopPropagation(); draggingFiles.current = false; setReceivingScheme(false); cancelClose();
             const files = Array.from(event.dataTransfer.files);
-            setOpen("diagram"); setTabs(current => ({ ...current, diagram: "saved" })); setUploadingImages(true);
-            void uploadSchemes(store, files).catch(reason => { if (alive.current) onNotice(reason.message); })
+            setOpen(prompt.id); selectTab(prompt.id, "saved"); setUploadingImages(true);
+            void uploadSchemes(imageMaterialStore(store, prompt.id), files).catch(reason => { if (alive.current) onNotice(reason.message); })
               .finally(() => { if (alive.current) setUploadingImages(false); });
           }}>
           <button
@@ -156,20 +170,20 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
             onClick={() => activate(prompt.id)}
           >
             {prompt.label}
-            {projectId && saved && (prompt.id === "diagram" ? saved.images.length > 0 : !!saved[prompt.id as "summary" | "minutes"].trim()) &&
+            {projectId && saved && (prompt.type === "images" ? saved.images.some(image => (image.prompt_id || "diagram") === prompt.id) : !!materialText(saved, prompt.id).trim()) &&
               <span className="material-check" aria-label="Материал готов">✓</span>}
           </button>
           {open === prompt.id && (
             <div className="prompt-popover-wrap">
               <section className={`prompt-popover${tab === "saved" && projectId ? " material-popover" : ""}`} id={`prompt-${prompt.id}`} role="dialog" aria-label={prompt.title}>
-                <strong className="prompt-title">{prompt.title}{prompt.id === "diagram" && uploadingImages ? " · Загружаю…" : ""}</strong>
+                <strong className="prompt-title">{prompt.title}{prompt.type === "images" && uploadingImages ? " · Загружаю…" : ""}</strong>
                 {projectId && <div className="material-tabs" role="tablist" aria-label="Содержимое раздела">
-                  <button type="button" role="tab" aria-selected={tab === "prompt"} onClick={() => { void store.flush(); setTabs(current => ({ ...current, [prompt.id]: "prompt" })); }}>Промпт</button>
-                  <button type="button" role="tab" aria-selected={tab === "saved"} onClick={() => setTabs(current => ({ ...current, [prompt.id]: "saved" }))}>Сохранённое</button>
+                  <button type="button" role="tab" aria-selected={tab === "prompt"} onClick={() => { void store.flush(); selectTab(prompt.id, "prompt"); }}>Промпт</button>
+                  <button type="button" role="tab" aria-selected={tab === "saved"} onClick={() => selectTab(prompt.id, "saved")}>Сохранённое</button>
                 </div>}
-                {tab === "saved" && projectId ? (prompt.id === "diagram"
-                  ? <DiagramMaterialPanel store={store} onNotice={onNotice} />
-                  : <TextMaterialPanel key={`${prompt.id}:${store.data ? "loaded" : "loading"}`} kind={prompt.id as "summary" | "minutes"} store={store} onNotice={onNotice} />)
+                {tab === "saved" && projectId ? (prompt.type === "images"
+                  ? <DiagramMaterialPanel key={prompt.id} store={imageMaterialStore(store, prompt.id)} onNotice={onNotice} />
+                  : <TextMaterialPanel key={`${prompt.id}:${store.data ? "loaded" : "loading"}`} kind={prompt.id} label={prompt.label} store={store} onNotice={onNotice} />)
                   : <>
                 <div className="prompt-copy-actions">
                   <button type="button" disabled={copying} onClick={() => copy(prompt.text, false)}>
@@ -187,8 +201,8 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
                       Промпт + транскрибация
                     </button>
                   )}
-                  {prompt.id === "diagram" && transcript !== undefined && store.data &&
-                    (store.data.summary.trim() || store.data.minutes.trim()) && <button type="button"
+                  {prompt.type === "images" && transcript !== undefined && store.data &&
+                    (store.data.summary.trim() || store.data.minutes.trim() || Object.values(store.data.texts || {}).some(text => text.trim())) && <button type="button"
                       disabled={copying || store.busy || transcriptLoading || !transcript.trim()}
                       title="Промпт, заполненные резюме и протокол, затем текущая транскрибация"
                       onClick={() => {
@@ -200,7 +214,7 @@ export default function PromptTools({ transcript, transcriptLoading, onNotice, a
                             const response = await fetch(store.base, { cache: "no-store" });
                             if (!response.ok) throw new Error("Не удалось получить сохранённые материалы");
                             const material = await response.json() as Materials;
-                            if (alive.current) await copy(diagramWithMaterials(prompt.text, text, material.summary, material.minutes), true,
+                            if (alive.current) await copy(diagramWithMaterials(prompt.text, text, material.summary, material.minutes, Object.entries(material.texts || {}).map(([id, text]) => ({ label: material.definitions?.[id]?.label || "Материал", text }))), true,
                               "Промпт для схемы со всеми материалами скопирован");
                           } catch (reason) {
                             if (alive.current) onNotice(reason instanceof Error ? reason.message : "Не удалось скопировать материалы");

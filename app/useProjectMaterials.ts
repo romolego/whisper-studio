@@ -24,3 +24,24 @@ export function useProjectMaterials(api: string, projectId?: string) {
   return { ...snapshot, base: store.base, edit: store.edit, editNote: store.editNote,
     flush: store.flush, mutate: store.mutate, reload: store.reload, refresh: store.refresh, ready: store.ready, draftText: store.draftText };
 }
+
+// One project queue/revision, with each image button showing only its own group.
+export function imageMaterialStore(store: ReturnType<typeof useProjectMaterials>, kind: string) {
+  const belongs = (image: import("./project-materials-store").ImageMaterial) => (image.prompt_id || "diagram") === kind;
+  const scoped = (data: import("./project-materials-store").Materials | null) => data ? { ...data, images: data.images.filter(belongs) } : null;
+  return { ...store, data: scoped(store.data), persisted: scoped(store.persisted),
+    mutate: (path: string, build: Parameters<typeof store.mutate>[1]) => store.mutate(
+      path === "/images" ? `${path}?kind=${encodeURIComponent(kind)}` : path,
+      (revision, current) => {
+        const request = build(revision, scoped(current)!);
+        if (path === "/images" && request.method === "PUT") {
+          const body = JSON.parse(request.body as string);
+          const first = current.images.findIndex(belongs);
+          const others = current.images.filter(image => !belongs(image));
+          others.splice(first < 0 ? others.length : first, 0, ...body.images);
+          return { ...request, body: JSON.stringify({ ...body, images: others.map(({ id, note }) => ({ id, note })) }) };
+        }
+        return request;
+      }),
+  };
+}

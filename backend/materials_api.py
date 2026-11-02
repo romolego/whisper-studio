@@ -14,13 +14,14 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from . import exporter, material_exports, materials, storage
+from . import prompt_catalog as catalog
 
 router = APIRouter(prefix="/api/projects/{project_id}/materials", tags=["Project materials"])
 batch_router = APIRouter(prefix="/api", tags=["Project materials"])
 
 
 def prompts() -> list[dict]:
-    return json.loads((Path(__file__).resolve().parents[1] / "app" / "transcript-prompts.json").read_text(encoding="utf-8"))
+    return catalog.get()["prompts"]
 
 
 @batch_router.get("/material-prompts")
@@ -28,15 +29,40 @@ def prompt_catalog():
     return prompts()
 
 
+class PromptDefinition(BaseModel):
+    id: str = Field(max_length=64)
+    label: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=120)
+    text: str = Field(min_length=1, max_length=2_000_000)
+    type: Literal["text", "images"]
+    enabled: bool = True
+
+
+class PromptSettings(BaseModel):
+    revision: int = Field(ge=0)
+    enabled: bool
+    prompts: list[PromptDefinition]
+
+
+@batch_router.get("/material-prompt-settings")
+def read_prompt_settings():
+    return _call(catalog.get)
+
+
+@batch_router.put("/material-prompt-settings")
+def write_prompt_settings(payload: PromptSettings):
+    return _call(catalog.save, payload.enabled, [item.model_dump() for item in payload.prompts], payload.revision)
+
+
 @router.get("/prompt/{kind}")
-def prompt_input(project_id: str, kind: Literal["summary", "minutes", "diagram"],
+def prompt_input(project_id: str, kind: str,
                  include_transcript: bool = True,
                  timestamps: Literal["none", "segments", "words"] = "none",
                  formatting: Literal["formatted", "plain"] = "formatted",
                  speakers: Literal["off", "on"] = "off", speaker_keys: str | None = None,
                  include_materials: bool = False):
     _call(storage.get_session, project_id)
-    prompt = next(item for item in prompts() if item["id"] == kind)
+    prompt = _call(catalog.find, kind)
     text = (_call(exporter.combined_text, project_id, timestamps, formatting, speakers,
                   exporter.parse_speaker_keys(speaker_keys)) if include_transcript else "")
     if include_transcript and not text.strip():
@@ -44,7 +70,7 @@ def prompt_input(project_id: str, kind: Literal["summary", "minutes", "diagram"]
     result = {"project_id": project_id, "kind": kind, "prompt": prompt["text"],
               "transcript": text, "input": prompt["text"] + ("\n\nТранскрибация:\n" + text if include_transcript else "")}
     if include_materials:
-        if kind != "diagram":
+        if prompt["type"] != "images":
             raise HTTPException(422, "Материалы добавляются к промпту схемы")
         data = _call(materials.get, project_id)
         blocks = [prompt["text"]]
@@ -52,6 +78,9 @@ def prompt_input(project_id: str, kind: Literal["summary", "minutes", "diagram"]
             blocks.append("Резюме:\n" + data["summary"])
         if data["minutes"].strip():
             blocks.append("Цифровой протокол:\n" + data["minutes"])
+        for key, value in data["texts"].items():
+            if value.strip():
+                blocks.append(data["definitions"][key]["label"] + ":\n" + value)
         if include_transcript:
             blocks.append("Исходная транскрибация:\n" + text)
         result.update(input="\n\n---\n\n".join(blocks), summary=data["summary"], minutes=data["minutes"], materials_revision=data["revision"])
@@ -147,12 +176,12 @@ def read(project_id: str):
 
 
 @router.put("/text/{kind}")
-def write(project_id: str, kind: Literal["summary", "minutes"], payload: TextEdit):
+def write(project_id: str, kind: str, payload: TextEdit):
     return _call(materials.save_text, project_id, kind, payload.text, payload.revision)
 
 
 @router.post("/images")
-async def upload(project_id: str, revision: int = Form(ge=0), file: UploadFile = File()):
+async def upload(project_id: str, revision: int = Form(ge=0), file: UploadFile = File(), kind: str = "diagram"):
     from starlette.concurrency import run_in_threadpool
     _call(storage.get_session, project_id)
     target = storage.temporary_dir() / f"scheme-{uuid.uuid4().hex}.upload"
@@ -161,7 +190,7 @@ async def upload(project_id: str, revision: int = Form(ge=0), file: UploadFile =
             with target.open("wb") as output:
                 import shutil
                 shutil.copyfileobj(file.file, output, 1024 * 1024)
-            return _call(materials.add_image, project_id, file.filename or "Схема", target, revision)
+            return _call(materials.add_image, project_id, file.filename or "Схема", target, revision, kind)
         finally:
             target.unlink(missing_ok=True)
     try:
@@ -200,7 +229,7 @@ def _download(name: str, content: bytes, media_type: str):
 
 
 @router.get("/text/{kind}/{extension}")
-def download(project_id: str, kind: Literal["summary", "minutes"], extension: Literal["txt", "docx"]):
+def download(project_id: str, kind: str, extension: Literal["txt", "docx"]):
     name, content = _call(materials.text_file, project_id, kind, extension)
     return _download(name, content, "text/plain" if extension == "txt" else
                      "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -215,7 +244,8 @@ def package(project_id: str, mode: Literal["zip", "files"], include_transcript: 
     files = _call(materials.package_files, project_id, include_transcript, transcript_format,
                   timestamps, formatting, speakers, speaker_keys)
     if mode == "zip":
-        return _download("Материалы проекта.zip", materials.zip_files(files), "application/zip")
+        name = storage.safe_file_name(_call(storage.get_session, project_id)["name"], fallback="Проект")
+        return _download(f"{name}.zip", materials.zip_files(files), "application/zip")
     # A single snapshot even if an agent edits the project between downloads.
     return {"files": [{"name": name, "base64": base64.b64encode(content).decode("ascii")}
                        for name, content in files]}
