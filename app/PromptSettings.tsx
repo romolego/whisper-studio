@@ -1,8 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { catalogEvent, type PromptCatalog, type PromptDefinition } from "./prompt-catalog";
+import { catalogEvent, promptSettingsDraftKey, type PromptCatalog, type PromptDefinition } from "./prompt-catalog";
 import { saveBlob } from "./MaterialPanels";
+
+function sameCatalog(left: PromptCatalog, right: PromptCatalog) {
+  return left.enabled === right.enabled && left.prompts.length === right.prompts.length && left.prompts.every((item, index) => {
+    const other = right.prompts[index];
+    return (["id", "label", "title", "text", "type", "enabled"] as const).every(key => item[key] === other[key]);
+  });
+}
 
 export default function PromptSettings({ api }: { api: string }) {
   const [draft, setDraft] = useState<PromptCatalog | null>(null);
@@ -18,22 +25,42 @@ export default function PromptSettings({ api }: { api: string }) {
   const changed = useRef(false);
   const conflict = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const key = `whisper-prompt-settings-draft:${api}`;
+  const loadVersion = useRef(0);
+  const mounted = useRef(true);
+  const legacyKey = `whisper-prompt-settings-draft:${api}`;
+  const key = promptSettingsDraftKey(api);
 
   async function load(discard = false) {
+    if (writing.current) return;
+    const version = ++loadVersion.current;
+    const startingDraft = current.current;
     try {
       const response = await fetch(`${api}/material-prompt-settings`, { cache: "no-store" });
       if (!response.ok) throw new Error((await response.json()).detail || "Не удалось загрузить промпты");
       const saved = await response.json() as PromptCatalog;
+      if (!mounted.current || version !== loadVersion.current) return;
+      if (current.current !== startingDraft) {
+        setError("Текст изменился во время обновления. Новые изменения оставлены в черновике.");
+        return;
+      }
       server.current = saved;
       let restored: PromptCatalog | null = null;
-      if (!discard) { try { restored = JSON.parse(localStorage.getItem(key) || "null"); } catch {} }
-      current.current = restored && Array.isArray(restored.prompts) ? restored : saved;
+      let source: string | null = null;
+      if (!discard) { try {
+        source = localStorage.getItem(key) ?? (key !== legacyKey ? localStorage.getItem(legacyKey) : null);
+        restored = JSON.parse(source || "null");
+      } catch {} }
+      current.current = restored && Array.isArray(restored.prompts) && !sameCatalog(restored, saved) ? restored : saved;
       changed.current = current.current !== saved;
       conflict.current = changed.current && current.current!.revision !== saved.revision;
       setDraft(current.current); setDirty(changed.current); setBlocked(conflict.current);
       setError(conflict.current ? "На сервере другая версия. Черновик сохранён в браузере." : "");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Не удалось загрузить промпты"); }
+      try {
+        if (changed.current) localStorage.setItem(key, JSON.stringify(current.current));
+        else localStorage.removeItem(key);
+        if (key !== legacyKey && source && localStorage.getItem(legacyKey) === source) localStorage.removeItem(legacyKey);
+      } catch { if (changed.current) setError("Черновик не сохранён в браузере. Дождитесь сохранения на сервере."); }
+    } catch (reason) { if (mounted.current && version === loadVersion.current) setError(reason instanceof Error ? reason.message : "Не удалось загрузить промпты"); }
   }
   async function save() {
     clearTimeout(timer.current);
@@ -51,10 +78,10 @@ export default function PromptSettings({ api }: { api: string }) {
         server.current = await response.json() as PromptCatalog;
         if (current.current === submitted) {
           current.current = server.current; changed.current = false; setDraft(server.current); setDirty(false);
-          try { localStorage.removeItem(key); } catch {}
+          if (mounted.current) { try { localStorage.removeItem(key); } catch {} }
         } else {
           current.current = { ...current.current, revision: server.current.revision };
-          localStorage.setItem(key, JSON.stringify(current.current));
+          if (mounted.current) localStorage.setItem(key, JSON.stringify(current.current));
         }
         setError(""); window.dispatchEvent(new Event(catalogEvent));
       }
@@ -76,11 +103,12 @@ export default function PromptSettings({ api }: { api: string }) {
     update(value => { const prompts = [...value.prompts]; const [item] = prompts.splice(index, 1); prompts.splice(index + offset, 0, item); return { ...value, prompts }; });
   }
   useEffect(() => {
+    mounted.current = true;
     void load();
     const leave = () => { void save(); };
     const unloading = (event: BeforeUnloadEvent) => { if (changed.current || writing.current) { void save(); event.preventDefault(); event.returnValue = ""; } };
     window.addEventListener("pagehide", leave); window.addEventListener("beforeunload", unloading);
-    return () => { clearTimeout(timer.current); void save(); window.removeEventListener("pagehide", leave); window.removeEventListener("beforeunload", unloading); };
+    return () => { mounted.current = false; clearTimeout(timer.current); void save(); window.removeEventListener("pagehide", leave); window.removeEventListener("beforeunload", unloading); };
     // The editor owns this draft until navigation; polling must not replace it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);
@@ -121,9 +149,9 @@ export default function PromptSettings({ api }: { api: string }) {
     </>}
     {error && <div role="alert"><p>{error}</p>
       {!blocked && <button type="button" onClick={() => void save()}>Повторить сохранение</button>}
-      <button type="button" onClick={() => {
+      <button type="button" disabled={busy} onClick={() => {
         if (current.current && changed.current) saveBlob("Черновик промптов.json", new Blob([JSON.stringify(current.current, null, 2)], { type: "application/json" }));
-        try { localStorage.removeItem(key); } catch {} void load(true);
+        void load(true);
       }}>Загрузить серверный вариант{dirty ? " (черновик скачается)" : ""}</button>
     </div>}
   </section>;

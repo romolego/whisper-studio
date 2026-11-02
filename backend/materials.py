@@ -202,8 +202,17 @@ def _recover_text_files(root: Path, data: dict) -> None:
     contents = {}
     for kind in TEXT_KINDS:
         contents.update(_text_files(kind, data[kind]))
-    for kind, text in data["texts"].items():
-        contents.update(_text_files(kind, text))
+    kinds = set(data["texts"])
+    custom = root / "custom"
+    # A first save can write exports before its new key reaches the manifest.
+    # Recover those reserved filenames too, without following external links.
+    if custom.is_dir() and custom.resolve().parent == root.resolve():
+        for folder in custom.iterdir():
+            if (re.fullmatch(prompt_catalog.CUSTOM_ID, folder.name) and folder.is_dir()
+                    and folder.resolve().parent == custom.resolve()):
+                kinds.add(folder.name)
+    for kind in kinds:
+        contents.update(_text_files(kind, data["texts"].get(kind, "")))
     _write_text_files(root, contents)
     _remove_generated(root / ".exports-dirty")
 
@@ -306,7 +315,9 @@ def text_file(project_id: str, kind: str, extension: str) -> tuple[str, bytes]:
     if extension not in {"txt", "docx"}:
         raise ValueError("Неизвестный формат материала")
     data = get(project_id)
-    definition = _definition(data, kind, "text")
+    definition = data["definitions"].get(kind) or _definition(data, kind, "text")
+    if definition["type"] != "text":
+        raise ValueError("Неизвестный вид материала")
     text = data[kind] if kind in TEXT_KINDS else data["texts"].get(kind, "")
     if not text.strip():
         raise ValueError("Материал ещё не заполнен")

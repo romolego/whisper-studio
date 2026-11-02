@@ -110,3 +110,51 @@ class PromptCatalogTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             prompt_catalog.get()
         self.assertEqual(path.read_text(), '{"broken":true}')
+
+    def test_saved_custom_exports_do_not_depend_on_catalog_health(self):
+        item = self.custom()
+        self.install(item)
+        saved = materials.save_text(self.project, item["id"], "Сохранённый результат", 0)
+        (self.root / "prompt-catalog.json").write_text('{"broken":', encoding="utf-8")
+        self.assertEqual(materials.get(self.project), saved)
+        self.assertIn("Сохранённый результат", materials.text_file(self.project, item["id"], "txt")[1].decode())
+        files = materials.package_files(self.project, False, "txt", "none", "formatted", "off")
+        self.assertEqual(len(files), 1)
+
+    def test_custom_export_label_matches_the_saved_project_snapshot(self):
+        item = self.custom()
+        catalog = self.install(item)
+        materials.save_text(self.project, item["id"], "Текст", 0)
+        for prompt in catalog["prompts"]:
+            if prompt["id"] == item["id"]:
+                prompt["label"] = prompt["title"] = "Другое название кнопки"
+        prompt_catalog.save(True, catalog["prompts"], catalog["revision"])
+        name, _ = materials.text_file(self.project, item["id"], "docx")
+        self.assertTrue(name.startswith(materials.get(self.project)["definitions"][item["id"]]["label"]))
+
+    def test_failed_first_custom_save_removes_uncommitted_generated_files(self):
+        item = self.custom()
+        self.install(item)
+        before = materials.save_text(self.project, "summary", "Прежний материал", 0)
+        with patch.object(materials, "_commit", side_effect=OSError("manifest could not be replaced")):
+            with self.assertRaises(OSError):
+                materials.save_text(self.project, item["id"], "Незавершённая запись", 1)
+        self.assertEqual(materials.get(self.project), before)
+        folder = storage.session_dir(self.project) / "materials" / "custom" / item["id"]
+        self.assertFalse((folder / "Текст.txt").exists())
+        self.assertFalse((folder / "Текст.docx").exists())
+
+    def test_interrupted_first_custom_save_recovers_without_touching_other_files(self):
+        item = self.custom()
+        self.install(item)
+        materials.save_text(self.project, "summary", "Зафиксировано", 0)
+        root = storage.session_dir(self.project) / "materials"
+        folder = root / "custom" / item["id"]
+        folder.mkdir(parents=True)
+        (folder / "Текст.txt").write_text("Частичная запись", encoding="utf-8")
+        note = folder / "Заметки.txt"
+        note.write_text("Личная заметка", encoding="utf-8")
+        (root / ".exports-dirty").write_bytes(b"1")
+        self.assertEqual(materials.get(self.project)["summary"], "Зафиксировано")
+        self.assertFalse((folder / "Текст.txt").exists())
+        self.assertEqual(note.read_text(encoding="utf-8"), "Личная заметка")
