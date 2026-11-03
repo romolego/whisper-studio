@@ -172,29 +172,33 @@ test("a late save from the closed editor cannot erase the reopened editor's draf
   assert.equal(b.observed.dirty, true);
 });
 
-function promptDialog(item = null) {
-  let draft;
-  const saved = [], cancelled = [];
+function promptDialog(item = null, index = 0, count = 1) {
+  const drafts = [];
+  let hookIndex = 0;
+  const saved = [], positions = [], cancelled = [], deleted = [];
   const state = {
     React: { createElement: (type, props, ...children) => ({ type, props: { ...props, children } }) },
-    useState: initial => { draft ??= initial(); return [draft, next => { draft = next; }]; },
+    useState: initial => { const slot = hookIndex++; if (!(slot in drafts)) drafts[slot] = typeof initial === "function" ? initial() : initial;
+      return [drafts[slot], next => { drafts[slot] = next; }]; },
     useRef: () => ({ current: null }), useEffect: () => {}, useId: () => "editor-title",
     crypto: { randomUUID: () => "12345678-1234-1234-1234-123456789abc" },
   };
   const component = action(settings, "PromptEditor", state);
   function nodes() {
+    hookIndex = 0;
     const result = [];
     function visit(value) {
       if (Array.isArray(value)) value.forEach(visit);
       else if (value && typeof value === "object" && value.props) { result.push(value); visit(value.props.children); }
     }
-    visit(component({ item, onSave: value => saved.push(value), onCancel: () => cancelled.push(true) }));
+    visit(component({ item, index, count, onSave: (value, position) => { saved.push(value); positions.push(position); },
+      onCancel: () => cancelled.push(true), onDelete: () => deleted.push(true) }));
     return result;
   }
   const button = name => nodes().find(node => node.type === "button" && node.props.children.join("") === name);
   const change = (label, value) => nodes().find(node => node.props["aria-label"] === label).props.onChange({ target: { value } });
   const submit = () => nodes().find(node => node.type === "form").props.onSubmit({ preventDefault() {} });
-  return { nodes, button, change, submit, saved, cancelled };
+  return { nodes, button, change, submit, saved, positions, cancelled, deleted };
 }
 
 test("new prompt stays uncommitted until its name and text are filled and submitted", () => {
@@ -247,4 +251,37 @@ test("dialog Escape cancels; confirmation preserves prompt identity, type and vi
   assert.equal(reopened.saved[0].type, original.type);
   assert.equal(reopened.saved[0].enabled, false);
   assert.equal(reopened.saved[0].text, "  Exact text\n");
+});
+
+test("prompt position stays local until confirmation and returning it restores unchanged state", () => {
+  const h = promptDialog(value().prompts[0], 1, 3);
+  const up = () => h.nodes().find(node => node.props["aria-label"] === "Выше: Summary");
+  const down = () => h.nodes().find(node => node.props["aria-label"] === "Ниже: Summary");
+  assert.equal(h.button("Готово"), undefined);
+  up().props.onClick();
+  assert.equal(up().props.disabled, true);
+  assert.ok(h.button("Готово"));
+  assert.equal(h.saved.length, 0);
+  down().props.onClick();
+  assert.equal(h.button("Готово"), undefined);
+  down().props.onClick();
+  assert.equal(down().props.disabled, true);
+  h.submit();
+  assert.equal(h.positions[0], 2);
+  assert.equal(h.saved[0].text, "Original");
+});
+
+test("creation has no move or delete actions; cancelling an edit never applies its position", () => {
+  const created = promptDialog();
+  assert.equal(created.nodes().some(node => /^(Выше:|Ниже:|Удалить промпт:)/.test(node.props["aria-label"] ?? "")), false);
+  const edited = promptDialog(value().prompts[0], 0, 2);
+  edited.nodes().find(node => node.props["aria-label"] === "Ниже: Summary").props.onClick();
+  edited.button("Отмена").props.onClick();
+  assert.equal(edited.saved.length, 0);
+  assert.equal(edited.positions.length, 0);
+  assert.equal(edited.deleted.length, 0);
+  const deletion = promptDialog(value().prompts[0]);
+  deletion.nodes().find(node => node.props["aria-label"] === "Удалить промпт: Summary").props.onClick();
+  assert.equal(deletion.deleted.length, 1);
+  assert.equal(deletion.saved.length, 0);
 });

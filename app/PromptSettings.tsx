@@ -11,14 +11,18 @@ function sameCatalog(left: PromptCatalog, right: PromptCatalog) {
   });
 }
 
-function PromptEditor({ item, onSave, onCancel }: { item: PromptDefinition | null; onSave: (value: PromptDefinition) => void; onCancel: () => void }) {
+function PromptEditor({ item, index, count, onSave, onCancel, onDelete }: {
+  item: PromptDefinition | null; index: number; count: number;
+  onSave: (value: PromptDefinition, position: number) => void; onCancel: () => void; onDelete: () => void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const nameInput = useRef<HTMLInputElement>(null);
   const titleId = useId();
   const [value, setValue] = useState<PromptDefinition>(() => item ? { ...item } : {
     id: `custom_${crypto.randomUUID().replaceAll("-", "")}`, type: "text", enabled: true, label: "", title: "", text: "",
   });
-  const modified = !!item && (value.label !== item.label || value.title !== item.title || value.text !== item.text);
+  const [position, setPosition] = useState(index);
+  const modified = !!item && (value.label !== item.label || value.title !== item.title || value.text !== item.text || position !== index);
   const valid = !!value.label.trim() && !!value.text.trim();
 
   useEffect(() => {
@@ -36,7 +40,7 @@ function PromptEditor({ item, onSave, onCancel }: { item: PromptDefinition | nul
       const bounds = event.currentTarget.getBoundingClientRect();
       if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) onCancel();
     }}>
-    <form onSubmit={event => { event.preventDefault(); if (valid && (!item || modified)) onSave(value); }}>
+    <form onSubmit={event => { event.preventDefault(); if (valid && (!item || modified)) onSave(value, position); }}>
       <button className="modal-close" type="button" aria-label="Отменить редактирование промпта" onClick={onCancel}>×</button>
       <div className="modal-symbol" aria-hidden="true">{item ? "✎" : "＋"}</div>
       <h2 id={titleId}>{item ? "Редактирование промпта" : "Новый промпт"}</h2>
@@ -52,6 +56,14 @@ function PromptEditor({ item, onSave, onCancel }: { item: PromptDefinition | nul
         onChange={event => setValue({ ...value, label: event.target.value, title: item && event.target.value === item.label ? item.title : event.target.value })} /></label>
       <label><span>Текст промпта</span><textarea aria-label="Текст промпта" rows={9} maxLength={2000000} required value={value.text}
         onChange={event => setValue({ ...value, text: event.target.value })} /></label>
+      {item && <div className="prompt-settings-actions prompt-editor-controls">
+        <div className="prompt-settings-order" role="group" aria-label="Порядок промпта">
+          <button className="prompt-settings-action" type="button" aria-label={`Выше: ${item.label}`} title="Выше" disabled={position === 0} onClick={() => setPosition(position - 1)}>↑</button>
+          <span aria-live="polite">{position + 1} из {count}</span>
+          <button className="prompt-settings-action" type="button" aria-label={`Ниже: ${item.label}`} title="Ниже" disabled={position === count - 1} onClick={() => setPosition(position + 1)}>↓</button>
+        </div>
+        <button className="prompt-settings-action danger-ghost" type="button" aria-label={`Удалить промпт: ${item.label}`} title="Удалить промпт" onClick={onDelete}>×</button>
+      </div>}
       <div className="modal-actions">
         <button type="button" onClick={onCancel}>Отмена</button>
         {(item ? modified : valid) && <button className="primary-button" type="submit" disabled={!valid}>{item ? "Готово" : "Сохранить"}</button>}
@@ -147,9 +159,6 @@ export default function PromptSettings({ api }: { api: string }) {
   function changePrompt(id: string, change: Partial<PromptDefinition>) {
     update(value => ({ ...value, prompts: value.prompts.map(item => item.id === id ? { ...item, ...change } : item) }));
   }
-  function move(index: number, offset: number) {
-    update(value => { const prompts = [...value.prompts]; const [item] = prompts.splice(index, 1); prompts.splice(index + offset, 0, item); return { ...value, prompts }; });
-  }
   useEffect(() => {
     mounted.current = true;
     void load();
@@ -173,21 +182,14 @@ export default function PromptSettings({ api }: { api: string }) {
             className={draft.enabled === enabled ? "active" : ""} onClick={() => update(value => ({ ...value, enabled }))}>{enabled ? "Вкл" : "Выкл"}</button>)}
         </div>
       </div>
-      {draft.prompts.map((item, index) => <article className="prompt-settings-item" key={item.id}>
+      {draft.prompts.map(item => <article className="prompt-settings-item" key={item.id}>
         <div className="prompt-settings-name"><strong>{item.label}</strong><small>{item.type === "text" ? "Текст" : "Картинки"}</small></div>
         <div className="prompt-settings-actions">
           <div className="choice" role="group" aria-label={`Показывать: ${item.label}`}>
             {[false, true].map(enabled => <button type="button" key={String(enabled)} aria-pressed={item.enabled === enabled}
               className={item.enabled === enabled ? "active" : ""} onClick={() => changePrompt(item.id, { enabled })}>{enabled ? "Вкл" : "Выкл"}</button>)}
           </div>
-          <div className="prompt-settings-order">
-            <button className="prompt-settings-action" type="button" aria-label={`Выше: ${item.label}`} title="Выше" disabled={!index} onClick={() => move(index, -1)}>↑</button>
-            <button className="prompt-settings-action" type="button" aria-label={`Ниже: ${item.label}`} title="Ниже" disabled={index === draft.prompts.length - 1} onClick={() => move(index, 1)}>↓</button>
-          </div>
-          <button className="prompt-settings-action" type="button" aria-label={`Править промпт: ${item.label}`} aria-haspopup="dialog" onClick={() => setEditing(item)}>Править</button>
-          <button className="prompt-settings-action" type="button" aria-label={`Удалить промпт: ${item.label}`} title="Удалить промпт" onClick={() => {
-            if (window.confirm(`Удалить кнопку «${item.label}»? Сохранённые материалы останутся в проектах.`)) update(value => ({ ...value, prompts: value.prompts.filter(prompt => prompt.id !== item.id) }));
-          }}>×</button>
+          <button className="prompt-settings-edit" type="button" aria-label={`Править промпт: ${item.label}`} title="Редактировать промпт" aria-haspopup="dialog" onClick={() => setEditing(item)}>✎</button>
         </div>
       </article>)}
       <div className="setting-row">
@@ -203,8 +205,23 @@ export default function PromptSettings({ api }: { api: string }) {
         }}>Загрузить серверный вариант{dirty ? " (черновик скачается)" : ""}</button>
       </div>
     </div>}
-    {editing && <PromptEditor item={editing === "new" ? null : editing} onCancel={() => setEditing(null)} onSave={prompt => {
-      update(value => ({ ...value, prompts: editing === "new" ? [...value.prompts, prompt] : value.prompts.map(item => item.id === prompt.id ? prompt : item) }));
+    {editing && <PromptEditor item={editing === "new" ? null : editing}
+      index={editing === "new" ? 0 : Math.max(0, draft?.prompts.findIndex(item => item.id === editing.id) ?? 0)} count={draft?.prompts.length ?? 0}
+      onCancel={() => setEditing(null)} onSave={(prompt, position) => {
+      update(value => {
+        const prompts = [...value.prompts];
+        if (editing !== "new") {
+          const previous = prompts.findIndex(item => item.id === prompt.id);
+          if (previous < 0) return value;
+          prompts.splice(previous, 1);
+        }
+        prompts.splice(editing === "new" ? prompts.length : position, 0, prompt);
+        return { ...value, prompts };
+      });
+      setEditing(null); void save();
+    }} onDelete={() => {
+      if (editing === "new" || !window.confirm(`Удалить кнопку «${editing.label}»? Сохранённые материалы останутся в проектах.`)) return;
+      update(value => ({ ...value, prompts: value.prompts.filter(item => item.id !== editing.id) }));
       setEditing(null); void save();
     }} />}
   </section>;

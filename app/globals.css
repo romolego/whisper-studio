@@ -1232,7 +1232,8 @@ a {
 .project-tools > button,
 .result-actions button,
 .combined-actions > button,
-.folder-manager button {
+.folder-manager button,
+.prompt-settings-edit {
   min-height: 34px;
   padding: 0 10px;
   border: 1px solid var(--line);
@@ -5060,6 +5061,8 @@ input {
 .prompt-settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .prompt-settings-item > .prompt-settings-actions { flex: 0 0 auto; max-width: 100%; }
 .prompt-settings-order { display: flex; gap: 3px; }
+.prompt-editor-controls { justify-content: space-between; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.prompt-editor-controls .prompt-settings-order { align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .prompt-settings-action {
   min-width: 31px;
   min-height: 31px;
