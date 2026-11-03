@@ -6515,8 +6515,6 @@ export default function Home() {
             </header>
 
             <div className="settings-layout">
-              <RemoteComputeSettings onChange={() => { void refresh(); }} />
-              <PromptSettings api={API} />
               <section className="settings-card">
                 <div className="settings-card-title">
                   <span>01</span>
@@ -6902,10 +6900,12 @@ export default function Home() {
                   </select>
                 </div>
                 <div className="setting-row">
-                  <div><strong>Транскрибация в пакете материалов</strong><p>Включать исходную транскрибацию при скачивании резюме, протокола и схем. Перед скачиванием галочку можно изменить.</p></div>
-                  <input type="checkbox" aria-label="Включать транскрибацию в пакет по умолчанию"
-                    checked={settings.materials_include_transcript !== "off"}
-                    onChange={event => saveSetting("materials_include_transcript", event.target.checked ? "on" : "off")} />
+                  <div><strong>Транскрибация в пакете материалов</strong><small>Включать исходную транскрибацию при скачивании материалов. Перед скачиванием выбор можно изменить.</small></div>
+                  <div className="choice" role="group" aria-label="Включать транскрибацию в пакет по умолчанию">
+                    {(["off", "on"] as const).map(value => <button type="button" key={value}
+                      className={(settings.materials_include_transcript || "on") === value ? "active" : ""}
+                      onClick={() => saveSetting("materials_include_transcript", value)}>{value === "on" ? "Вкл" : "Выкл"}</button>)}
+                  </div>
                 </div>
                 <div className="setting-row">
                   <strong>Формат транскрибации в пакете</strong>
@@ -7837,6 +7837,8 @@ export default function Home() {
                   </div>
                 )}
               </section>
+              <PromptSettings api={API} />
+              <RemoteComputeSettings onChange={() => { void refresh(); }} />
             </div>
           </section>
         )}

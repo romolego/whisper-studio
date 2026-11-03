@@ -13,7 +13,7 @@ function find(tree, predicate) {
   visit(tree); return found;
 }
 function compile(source, state) {
-  return vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, state);
+  return vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText, state);
 }
 function action(tree, name, state) {
   const node = find(tree, node => ts.isFunctionDeclaration(node) && node.name?.text === name);
@@ -170,4 +170,81 @@ test("a late save from the closed editor cannot erase the reopened editor's draf
   await saving;
   assert.match(b.storage.getItem(b.state.key) ?? "", /Newer edit after reopening/);
   assert.equal(b.observed.dirty, true);
+});
+
+function promptDialog(item = null) {
+  let draft;
+  const saved = [], cancelled = [];
+  const state = {
+    React: { createElement: (type, props, ...children) => ({ type, props: { ...props, children } }) },
+    useState: initial => { draft ??= initial(); return [draft, next => { draft = next; }]; },
+    useRef: () => ({ current: null }), useEffect: () => {}, useId: () => "editor-title",
+    crypto: { randomUUID: () => "12345678-1234-1234-1234-123456789abc" },
+  };
+  const component = action(settings, "PromptEditor", state);
+  function nodes() {
+    const result = [];
+    function visit(value) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === "object" && value.props) { result.push(value); visit(value.props.children); }
+    }
+    visit(component({ item, onSave: value => saved.push(value), onCancel: () => cancelled.push(true) }));
+    return result;
+  }
+  const button = name => nodes().find(node => node.type === "button" && node.props.children.join("") === name);
+  const change = (label, value) => nodes().find(node => node.props["aria-label"] === label).props.onChange({ target: { value } });
+  const submit = () => nodes().find(node => node.type === "form").props.onSubmit({ preventDefault() {} });
+  return { nodes, button, change, submit, saved, cancelled };
+}
+
+test("new prompt stays uncommitted until its name and text are filled and submitted", () => {
+  const h = promptDialog();
+  assert.equal(h.button("Сохранить"), undefined);
+  h.submit(); assert.equal(h.saved.length, 0);
+  h.button("Картинки").props.onClick();
+  h.change("Название промпта", "Моя схема");
+  h.change("Текст промпта", "  \n");
+  assert.equal(h.button("Сохранить"), undefined);
+  h.change("Текст промпта", "Нарисуй схему");
+  assert.ok(h.button("Сохранить"));
+  assert.equal(h.saved.length, 0);
+  h.submit();
+  assert.equal(h.saved.length, 1);
+  assert.equal(h.saved[0].type, "images");
+  assert.equal(h.saved[0].title, "Моя схема");
+  assert.equal(h.saved[0].text, "Нарисуй схему");
+});
+
+test("editing offers Done only for changes and cancel leaves the original prompt intact", () => {
+  const original = { ...value().prompts[0], title: "Long document title" };
+  const h = promptDialog(original);
+  assert.equal(h.button("Готово"), undefined);
+  assert.equal(h.nodes().some(node => node.props["aria-label"] === "Тип нового промпта"), false);
+  h.change("Название промпта", "Renamed");
+  assert.ok(h.button("Готово"));
+  h.change("Название промпта", original.label);
+  assert.equal(h.button("Готово"), undefined);
+  h.change("Текст промпта", "Changed locally");
+  h.button("Отмена").props.onClick();
+  assert.equal(h.cancelled.length, 1);
+  assert.equal(h.saved.length, 0);
+  assert.equal(original.text, "Original");
+});
+
+test("dialog Escape cancels; confirmation preserves prompt identity, type and visibility", () => {
+  const original = { ...value().prompts[0], enabled: false };
+  const h = promptDialog(original);
+  h.change("Текст промпта", "  Exact text\n");
+  let prevented = false;
+  h.nodes().find(node => node.type === "dialog").props.onCancel({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(h.cancelled.length, 1);
+  assert.equal(h.saved.length, 0);
+  const reopened = promptDialog(original);
+  reopened.change("Текст промпта", "  Exact text\n");
+  reopened.submit();
+  assert.equal(reopened.saved[0].id, original.id);
+  assert.equal(reopened.saved[0].type, original.type);
+  assert.equal(reopened.saved[0].enabled, false);
+  assert.equal(reopened.saved[0].text, "  Exact text\n");
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { catalogEvent, promptSettingsDraftKey, type PromptCatalog, type PromptDefinition } from "./prompt-catalog";
 import { saveBlob } from "./MaterialPanels";
 
@@ -11,14 +11,62 @@ function sameCatalog(left: PromptCatalog, right: PromptCatalog) {
   });
 }
 
+function PromptEditor({ item, onSave, onCancel }: { item: PromptDefinition | null; onSave: (value: PromptDefinition) => void; onCancel: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const nameInput = useRef<HTMLInputElement>(null);
+  const titleId = useId();
+  const [value, setValue] = useState<PromptDefinition>(() => item ? { ...item } : {
+    id: `custom_${crypto.randomUUID().replaceAll("-", "")}`, type: "text", enabled: true, label: "", title: "", text: "",
+  });
+  const modified = !!item && (value.label !== item.label || value.title !== item.title || value.text !== item.text);
+  const valid = !!value.label.trim() && !!value.text.trim();
+
+  useEffect(() => {
+    const element = dialog.current;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    element?.showModal();
+    nameInput.current?.focus();
+    return () => { element?.close(); if (previousFocus?.isConnected) previousFocus.focus(); };
+  }, []);
+
+  return <dialog ref={dialog} className="modal prompt-settings-modal" aria-labelledby={titleId}
+    onCancel={event => { event.preventDefault(); onCancel(); }}
+    onClick={event => {
+      if (event.target !== event.currentTarget) return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) onCancel();
+    }}>
+    <form onSubmit={event => { event.preventDefault(); if (valid && (!item || modified)) onSave(value); }}>
+      <button className="modal-close" type="button" aria-label="Отменить редактирование промпта" onClick={onCancel}>×</button>
+      <div className="modal-symbol" aria-hidden="true">{item ? "✎" : "＋"}</div>
+      <h2 id={titleId}>{item ? "Редактирование промпта" : "Новый промпт"}</h2>
+      <div className="prompt-editor-type">
+        <span>Тип материала</span>
+        {item ? <strong>{item.type === "text" ? "Текст" : "Картинки"}</strong> :
+          <div className="choice" role="group" aria-label="Тип нового промпта">
+            {(["text", "images"] as const).map(type => <button key={type} type="button" aria-pressed={value.type === type}
+              className={value.type === type ? "active" : ""} onClick={() => setValue({ ...value, type })}>{type === "text" ? "Текст" : "Картинки"}</button>)}
+          </div>}
+      </div>
+      <label><span>Название</span><input ref={nameInput} aria-label="Название промпта" value={value.label} maxLength={120} required
+        onChange={event => setValue({ ...value, label: event.target.value, title: item && event.target.value === item.label ? item.title : event.target.value })} /></label>
+      <label><span>Текст промпта</span><textarea aria-label="Текст промпта" rows={9} maxLength={2000000} required value={value.text}
+        onChange={event => setValue({ ...value, text: event.target.value })} /></label>
+      <div className="modal-actions">
+        <button type="button" onClick={onCancel}>Отмена</button>
+        {(item ? modified : valid) && <button className="primary-button" type="submit" disabled={!valid}>{item ? "Готово" : "Сохранить"}</button>}
+      </div>
+    </form>
+  </dialog>;
+}
+
 export default function PromptSettings({ api }: { api: string }) {
   const [draft, setDraft] = useState<PromptCatalog | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [blocked, setBlocked] = useState(false);
-  const [newType, setNewType] = useState<"text" | "images">("text");
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<PromptDefinition | "new" | null>(null);
   const current = useRef<PromptCatalog | null>(null);
   const server = useRef<PromptCatalog | null>(null);
   const writing = useRef(false);
@@ -115,44 +163,49 @@ export default function PromptSettings({ api }: { api: string }) {
 
   return <section className="settings-card prompt-settings" onBlur={event => {
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) void save();
-  }} onKeyDown={event => { if (event.key === "Escape") { void save(); setEditing(null); } }}>
-    <div className="settings-card-title"><span>✎</span><div><h2>Промпты и материалы</h2></div></div>
-    {!draft ? <button type="button" onClick={() => void load()}>Загрузить настройки промптов</button> : <>
-      <label className="setting-row"><strong>Показывать блок промптов</strong><input type="checkbox" checked={draft.enabled}
-        onChange={event => update(value => ({ ...value, enabled: event.target.checked }))} /></label>
-      <p>Кнопки можно выключать, перемещать и удалять. Сохранённые материалы остаются в проектах. Тип после создания не меняется.</p>
+  }}>
+    <div className="settings-card-title"><span>10</span><div><h2>Промпты и материалы</h2></div></div>
+    {!draft ? <div className="setting-row"><button className="secondary-button" type="button" onClick={() => void load()}>Загрузить настройки промптов</button></div> : <>
+      <div className="setting-row">
+        <div><strong>Показывать блок промптов</strong><small>Сохранённые материалы остаются в проектах при отключении и удалении кнопок.</small></div>
+        <div className="choice" role="group" aria-label="Показывать блок промптов">
+          {[false, true].map(enabled => <button type="button" key={String(enabled)} aria-pressed={draft.enabled === enabled}
+            className={draft.enabled === enabled ? "active" : ""} onClick={() => update(value => ({ ...value, enabled }))}>{enabled ? "Вкл" : "Выкл"}</button>)}
+        </div>
+      </div>
       {draft.prompts.map((item, index) => <article className="prompt-settings-item" key={item.id}>
-        <div className="prompt-settings-row prompt-copy-actions">
-          <input type="checkbox" aria-label={`Показывать: ${item.label}`} checked={item.enabled} onChange={event => changePrompt(item.id, { enabled: event.target.checked })} />
-          <strong>{item.label}</strong><small>{item.type === "text" ? "Текст" : "Картинки"}</small>
-          <button type="button" aria-label={`Выше: ${item.label}`} disabled={!index} onClick={() => move(index, -1)}>↑</button>
-          <button type="button" aria-label={`Ниже: ${item.label}`} disabled={index === draft.prompts.length - 1} onClick={() => move(index, 1)}>↓</button>
-          <button type="button" aria-expanded={editing === item.id} onClick={() => { void save(); setEditing(editing === item.id ? null : item.id); }}>✎ Править</button>
-          <button type="button" aria-label={`Удалить промпт: ${item.label}`} onClick={() => {
+        <div className="prompt-settings-name"><strong>{item.label}</strong><small>{item.type === "text" ? "Текст" : "Картинки"}</small></div>
+        <div className="prompt-settings-actions">
+          <div className="choice" role="group" aria-label={`Показывать: ${item.label}`}>
+            {[false, true].map(enabled => <button type="button" key={String(enabled)} aria-pressed={item.enabled === enabled}
+              className={item.enabled === enabled ? "active" : ""} onClick={() => changePrompt(item.id, { enabled })}>{enabled ? "Вкл" : "Выкл"}</button>)}
+          </div>
+          <div className="prompt-settings-order">
+            <button className="prompt-settings-action" type="button" aria-label={`Выше: ${item.label}`} title="Выше" disabled={!index} onClick={() => move(index, -1)}>↑</button>
+            <button className="prompt-settings-action" type="button" aria-label={`Ниже: ${item.label}`} title="Ниже" disabled={index === draft.prompts.length - 1} onClick={() => move(index, 1)}>↓</button>
+          </div>
+          <button className="prompt-settings-action" type="button" aria-label={`Править промпт: ${item.label}`} aria-haspopup="dialog" onClick={() => setEditing(item)}>Править</button>
+          <button className="prompt-settings-action" type="button" aria-label={`Удалить промпт: ${item.label}`} title="Удалить промпт" onClick={() => {
             if (window.confirm(`Удалить кнопку «${item.label}»? Сохранённые материалы останутся в проектах.`)) update(value => ({ ...value, prompts: value.prompts.filter(prompt => prompt.id !== item.id) }));
           }}>×</button>
         </div>
-        {editing === item.id && <div className="prompt-settings-editor">
-          <label>Название<input aria-label="Название промпта" value={item.label} maxLength={120} onChange={event => changePrompt(item.id, { label: event.target.value, title: event.target.value })} /></label>
-          <label>Текст промпта<textarea aria-label="Текст промпта" rows={9} maxLength={2000000} value={item.text} onChange={event => changePrompt(item.id, { text: event.target.value })} /></label>
-          <button type="button" onClick={() => { void save(); setEditing(null); }}>✓ Готово</button>
-        </div>}
       </article>)}
-      <div className="prompt-settings-row prompt-copy-actions">
-        <select aria-label="Тип нового промпта" value={newType} onChange={event => setNewType(event.target.value as "text" | "images")}><option value="text">Текст</option><option value="images">Картинки</option></select>
-        <button type="button" onClick={() => { const id = `custom_${crypto.randomUUID().replaceAll("-", "")}`;
-          update(value => ({ ...value, prompts: [...value.prompts, { id, type: newType, enabled: true, label: "Новый промпт", title: "Новый промпт", text: "Введите текст своего промпта." }] })); setEditing(id);
-        }}>＋ Добавить промпт</button>
-        <button type="button" disabled={busy || blocked || !dirty} onClick={() => void save()}>{busy ? "Сохраняю…" : "Сохранить"}</button>
-        <span aria-live="polite">{dirty ? "Есть несохранённые изменения" : "Сохранено"}</span>
+      <div className="setting-row">
+        <button className="secondary-button" type="button" onClick={() => setEditing("new")}>＋ Добавить промпт</button>
       </div>
     </>}
-    {error && <div role="alert"><p>{error}</p>
-      {!blocked && <button type="button" onClick={() => void save()}>Повторить сохранение</button>}
-      <button type="button" disabled={busy} onClick={() => {
-        if (current.current && changed.current) saveBlob("Черновик промптов.json", new Blob([JSON.stringify(current.current, null, 2)], { type: "application/json" }));
-        void load(true);
-      }}>Загрузить серверный вариант{dirty ? " (черновик скачается)" : ""}</button>
+    {error && <div className="prompt-settings-error" role="alert"><p>{error}</p>
+      <div className="prompt-settings-actions">
+        {!blocked && <button className="secondary-button" type="button" disabled={busy} onClick={() => void save()}>Повторить сохранение</button>}
+        <button className="secondary-button" type="button" disabled={busy} onClick={() => {
+          if (current.current && changed.current) saveBlob("Черновик промптов.json", new Blob([JSON.stringify(current.current, null, 2)], { type: "application/json" }));
+          void load(true);
+        }}>Загрузить серверный вариант{dirty ? " (черновик скачается)" : ""}</button>
+      </div>
     </div>}
+    {editing && <PromptEditor item={editing === "new" ? null : editing} onCancel={() => setEditing(null)} onSave={prompt => {
+      update(value => ({ ...value, prompts: editing === "new" ? [...value.prompts, prompt] : value.prompts.map(item => item.id === prompt.id ? prompt : item) }));
+      setEditing(null); void save();
+    }} />}
   </section>;
 }
