@@ -94,8 +94,8 @@ def local_capabilities() -> dict:
         "host_id": credentials()["id"],
         "device_preference": runtime.preferred_device(),
         "cuda_available": ctranslate2.get_cuda_device_count() > 0,
-        "models": {"ru": (transcriber.RUSSIAN_MODEL_DIR / "model.bin").is_file(),
-                   "turbo": (transcriber.ENGLISH_MODEL_DIR / "model.bin").is_file(),
+        "models": {"ru": not runtime.missing_turbo_files(transcriber.RUSSIAN_MODEL_DIR),
+                   "turbo": not runtime.missing_turbo_files(transcriber.ENGLISH_MODEL_DIR),
                    "large-v3": (transcriber.FULL_MODEL_DIR / "model.bin").is_file()},
         # Do not disclose local paths or tokens on the network.
         "engines": {key: {name: value[name] for name in ("available", "model_ready", "device", "cuda_available")}
@@ -212,6 +212,9 @@ class ComputeHost:
     def run(self, task: Task):
         from . import transcriber
         from .app import MODEL_CACHE
+        result = None
+        error = None
+        status = "failed"
         try:
             # The same process owns local and remote GPU work. No second CUDA cache.
             with MODEL_CACHE.activity(), remote_client.local_only(), gpu_turns.batch(cancel_check=lambda: cancellation.check(task.id)):
@@ -222,7 +225,9 @@ class ComputeHost:
                     model_path = {"ru": transcriber.RUSSIAN_MODEL_DIR,
                                   "large-v3": transcriber.FULL_MODEL_DIR,
                                   "turbo": transcriber.ENGLISH_MODEL_DIR}[model_key]
-                    if not (model_path / "model.bin").is_file():
+                    ready = ((model_path / "model.bin").is_file() if model_key == "large-v3"
+                             else not runtime.missing_turbo_files(model_path))
+                    if not ready:
                         raise RuntimeError("На удалённом компьютере не установлена выбранная модель")
                     model, device = transcriber._load_model(task.spec.model)
                     generator, info = model.transcribe(str(task.path), **task.spec.options)
@@ -251,23 +256,31 @@ class ComputeHost:
                              else diarization._turns_local(task.path))
                     result = {"turns": turns}
                 cancellation.check(task.id)
-                with self.lock:
-                    task.result = jsonable_encoder(result)
-                    task.status = "completed"
-                    task.progress = 1
+            result = jsonable_encoder(result)
+            status = "completed"
         except cancellation.CancelledJob:
-            task.status = "cancelled"
+            status = "cancelled"
         except Exception:
             # Exception details can contain paths or worker credentials.
             logging.getLogger("whisper.remote").exception("Remote model failed for %s", task.id)
-            task.error = "Ошибка удалённой модели. Проверьте модель и устройство в Whisper на основном компьютере."
-            task.status = "failed"
+            error = "Ошибка удалённой модели. Проверьте модель и устройство в Whisper на основном компьютере."
         finally:
-            task.folder.cleanup()
+            try:
+                task.folder.cleanup()
+            except OSError:
+                logging.getLogger("whisper.remote").exception("Could not remove temporary audio for %s", task.id)
+                status = "failed"
+                error = "Не удалось удалить временные файлы удалённой задачи."
             with self.lock:
+                cancellation.release(task.id)
                 if task.discard:
                     self.tasks.pop(task.id, None)
-            cancellation.release(task.id)
+                else:
+                    task.status = status
+                    task.error = error
+                    if status == "completed":
+                        task.result = result
+                        task.progress = 1
 
 
 class HostController:

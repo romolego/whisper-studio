@@ -72,7 +72,8 @@ class RemoteComputeTests(unittest.TestCase):
             item.start()
             self.addCleanup(item.stop)
         (self.root / "model").mkdir()
-        (self.root / "model" / "model.bin").touch()
+        for name in transcriber.runtime.TURBO_MODEL_FILES:
+            (self.root / "model" / name).touch()
         self.audio = self.root / "source.wav"
         self.audio.write_bytes(wav_bytes())
         self.host = remote_host.ComputeHost("x" * 43)
@@ -130,6 +131,32 @@ class RemoteComputeTests(unittest.TestCase):
             self.assertEqual(self.options[0]["beam_size"], 3)
             self.assertEqual(self.host.tasks, {})
             self.assertEqual(list((self.root / "remote-work").iterdir()), [])
+
+    def test_result_is_published_after_audio_cleanup(self):
+        folder = tempfile.TemporaryDirectory(dir=self.root)
+        task = remote_host.Task("remote-cleanup-test", folder, remote_host.TaskSpec(kind="whisper"))
+        task.path.write_bytes(wav_bytes())
+        self.host.tasks[task.id] = task
+        entered, resume = threading.Event(), threading.Event()
+        cleanup = folder.cleanup
+
+        def delayed_cleanup():
+            entered.set()
+            resume.wait(5)
+            cleanup()
+
+        with patch.object(folder, "cleanup", side_effect=delayed_cleanup):
+            future = self.host.executor.submit(self.host.run, task)
+            try:
+                self.assertTrue(entered.wait(5))
+                pending = self.host.state(task.id)
+                self.assertEqual(pending["status"], "processing")
+                self.assertIsNone(pending["result"])
+            finally:
+                resume.set()
+                future.result(timeout=5)
+        self.assertEqual(self.host.state(task.id)["status"], "completed")
+        self.assertFalse(Path(folder.name).exists())
 
     def test_array_audio_for_full_speech_profile(self):
         import numpy as np

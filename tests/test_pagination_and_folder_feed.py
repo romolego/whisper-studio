@@ -16,12 +16,13 @@ from __future__ import annotations
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi import Response
 
 from backend import app as backend_app
-from backend import storage
+from backend import exporter, storage
 
 
 class PaginationTests(unittest.TestCase):
@@ -78,6 +79,24 @@ class PaginationTests(unittest.TestCase):
         return items, int(response.headers["X-Total-Count"])
 
     # --- лента проектов ---
+
+    def test_large_project_exports_late_file_and_reports_old_active_job(self):
+        project = self._projects(1)[0]
+        with storage.connect() as db:
+            db.executemany(
+                """INSERT INTO jobs(id, session_id, original_name, stored_path, status,
+                                    options_json, created_at, position)
+                   VALUES (?, ?, 'record.wav', '', ?, '{}', '2026-01-01', ?)""",
+                ((str(i), project, "processing" if i == 0 else
+                  "completed" if i == 1001 else "cancelled", i) for i in range(1002)),
+            )
+        transcript = self._root / "last.txt"
+        transcript.write_text("Последний файл", encoding="utf-8")
+        storage.add_output("1001", "txt", transcript)
+        self.assertEqual(exporter.combined_text(project), "Последний файл")
+        with patch.object(backend_app, "_ensure_workers"):
+            self.assertEqual(backend_app.queue_overview()["active"]["id"], "0")
+
 
     def test_page_returns_only_requested_slice(self) -> None:
         self._projects(25)

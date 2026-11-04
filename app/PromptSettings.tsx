@@ -120,6 +120,10 @@ export default function PromptSettings({ api }: { api: string }) {
         else localStorage.removeItem(key);
         if (key !== legacyKey && source && localStorage.getItem(legacyKey) === source) localStorage.removeItem(legacyKey);
       } catch { if (changed.current) setError("Черновик не сохранён в браузере. Дождитесь сохранения на сервере."); }
+      if (changed.current && !conflict.current) {
+        clearTimeout(timer.current);
+        timer.current = setTimeout(() => void save(), 650);
+      }
     } catch (reason) { if (mounted.current && version === loadVersion.current) setError(reason instanceof Error ? reason.message : "Не удалось загрузить промпты"); }
   }
   async function save() {
@@ -161,11 +165,18 @@ export default function PromptSettings({ api }: { api: string }) {
   }
   useEffect(() => {
     mounted.current = true;
-    void load();
+    const initialLoad = window.setTimeout(() => { void load(); }, 0);
     const leave = () => { void save(); };
     const unloading = (event: BeforeUnloadEvent) => { if (changed.current || writing.current) { void save(); event.preventDefault(); event.returnValue = ""; } };
     window.addEventListener("pagehide", leave); window.addEventListener("beforeunload", unloading);
-    return () => { mounted.current = false; clearTimeout(timer.current); void save(); window.removeEventListener("pagehide", leave); window.removeEventListener("beforeunload", unloading); };
+    return () => {
+      mounted.current = false;
+      window.clearTimeout(initialLoad);
+      clearTimeout(timer.current);
+      void save();
+      window.removeEventListener("pagehide", leave);
+      window.removeEventListener("beforeunload", unloading);
+    };
     // The editor owns this draft until navigation; polling must not replace it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);

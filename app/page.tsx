@@ -15,6 +15,7 @@ import {
   PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -1471,6 +1472,8 @@ export default function Home() {
   const [trimOpen, setTrimOpen] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const projectCreationPending = useRef(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [urlValue, setUrlValue] = useState("");
   const [urlPasscode, setUrlPasscode] = useState("");
@@ -1567,6 +1570,7 @@ export default function Home() {
   const [savingRecording, setSavingRecording] = useState(false);
   const [pendingRecordingCount, setPendingRecordingCount] = useState(0);
   const [autoConfirmDictationId, setAutoConfirmDictationId] = useState("");
+  const [confirmingDictation, setConfirmingDictation] = useState(false);
   const [editingHistoryId, setEditingHistoryId] = useState("");
   const [historyTextDraft, setHistoryTextDraft] = useState("");
   const [transcriptText, setTranscriptText] = useState("");
@@ -1606,7 +1610,8 @@ export default function Home() {
   const waveformFrameRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const flushingRecordingsRef = useRef(false);
-  const autoConfirmInFlightRef = useRef(false);
+  const confirmInFlightRef = useRef(false);
+  const dictationSavesRef = useRef(new Set<Promise<Response>>());
   const speakerSelectionProjectRef = useRef("");
   const speakerSampleAudioRef = useRef<HTMLAudioElement | null>(null);
   const speakerSampleUrlRef = useRef("");
@@ -1696,7 +1701,13 @@ export default function Home() {
       ? "folder"
       : "recent";
 
-  const refresh = useCallback(async () => {
+  const activeRefresh = useRef<(() => Promise<void>) | null>(null);
+  const refreshStarted = useRef(0);
+  const refreshApplied = useRef(0);
+  const refresh = useCallback(async function refreshView() {
+    if (activeRefresh.current !== refreshView) return;
+    const request = ++refreshStarted.current;
+    const obsolete = () => activeRefresh.current !== refreshView || request < refreshApplied.current;
     try {
       const projectQuery = new URLSearchParams({
         folder: folderFilter,
@@ -1728,7 +1739,9 @@ export default function Home() {
             cache: "no-store",
           }),
           fetch(`${API}/folders`, { cache: "no-store" }),
-          fetch(`${API}/jobs`, { cache: "no-store" }),
+          fetch(screen === "project" && activeProjectId
+            ? `${API}/jobs?session_id=${encodeURIComponent(activeProjectId)}`
+            : `${API}/jobs`, { cache: "no-store" }),
           fetch(`${API}/media`, { cache: "no-store" }),
           fetch(`${API}/settings`, { cache: "no-store" }),
           fetch(`${API}/diarization/status`, { cache: "no-store" }),
@@ -1753,8 +1766,16 @@ export default function Home() {
       ) {
         throw new Error("Сервер не отвечает");
       }
-      const nextSettings = (await settingsResponse.json()) as Settings;
-      const nextProjects = (await projectsResponse.json()) as Project[];
+      const [nextSettings, nextProjects, nextCounts, nextFolders, nextJobs, nextMedia,
+        nextDiarization, nextDictations, nextDownloads, nextQueue] = await Promise.all([
+        settingsResponse.json() as Promise<Settings>, projectsResponse.json() as Promise<Project[]>,
+        countsResponse.json() as Promise<ProjectCounts>, foldersResponse.json() as Promise<Folder[]>,
+        jobsResponse.json() as Promise<Job[]>, mediaResponse.json() as Promise<StagedMedia[]>,
+        diarizationResponse.json() as Promise<DiarizationStatus>, dictationsResponse.json() as Promise<DictationMessage[]>,
+        urlDownloadsResponse.json() as Promise<UrlDownload[]>, queueResponse.json() as Promise<QueueOverview>,
+      ]);
+      if (obsolete()) return;
+      refreshApplied.current = request;
       setProjects(nextProjects);
       // Сколько всего проектов подходит под текущий фильтр — знает только
       // сервер: на руках у страницы лишь её кусок списка.
@@ -1762,7 +1783,7 @@ export default function Home() {
         Number(projectsResponse.headers.get("X-Total-Count")) ||
           nextProjects.length,
       );
-      setProjectCounts((await countsResponse.json()) as ProjectCounts);
+      setProjectCounts(nextCounts);
       // Отметка на исчезнувшем проекте — удалённом поштучно или из другой
       // вкладки — иначе продолжала бы считаться в «Удалить N».
       setSelectedProjects((current) => {
@@ -1771,9 +1792,8 @@ export default function Home() {
         const next = new Set([...current].filter((id) => alive.has(id)));
         return next.size === current.size ? current : next;
       });
-      setFolders((await foldersResponse.json()) as Folder[]);
-      setJobs((await jobsResponse.json()) as Job[]);
-      const nextMedia = (await mediaResponse.json()) as StagedMedia[];
+      setFolders(nextFolders);
+      setJobs(nextJobs);
       setMedia(nextMedia);
       setTrackSelections((current) => {
         const next = { ...current };
@@ -1785,21 +1805,15 @@ export default function Home() {
         return next;
       });
       setSettings(nextSettings);
-      setDiarizationStatus(
-        (await diarizationResponse.json()) as DiarizationStatus,
-      );
-      setDictations(
-        (await dictationsResponse.json()) as DictationMessage[],
-      );
+      setDiarizationStatus(nextDiarization);
+      setDictations(nextDictations);
       // В заголовке — количество подтверждённых сообщений: черновик приходит
       // сверх страницы и в счёт истории не идёт.
       setDictationTotal(
         Number(dictationsResponse.headers.get("X-Total-Count")) || 0,
       );
-      setUrlDownloads(
-        (await urlDownloadsResponse.json()) as UrlDownload[],
-      );
-      setQueueOverview((await queueResponse.json()) as QueueOverview);
+      setUrlDownloads(nextDownloads);
+      setQueueOverview(nextQueue);
       const shouldApplySavedDefaults =
         !defaultsApplied.current || settingsReconnectRefreshNeeded.current;
       const shouldApplySavedViewDefaults =
@@ -1838,20 +1852,20 @@ export default function Home() {
           `${API}/projects/${activeProjectId}`,
           { cache: "no-store" },
         );
-        setActiveProjectDetail(
-          detailResponse.ok
-            ? ((await detailResponse.json()) as Project)
-            : null,
-        );
+        const detail = detailResponse.ok ? (await detailResponse.json()) as Project : null;
+        if (!obsolete()) setActiveProjectDetail(detail);
       } else {
         setActiveProjectDetail(null);
       }
     } catch {
+      if (obsolete()) return;
+      refreshApplied.current = request;
       settingsReconnectRefreshNeeded.current = true;
       setOnline(false);
     }
   }, [
     activeProjectId,
+    screen,
     dictationCurrentPage,
     dictationPerPage,
     folderFilter,
@@ -1861,9 +1875,11 @@ export default function Home() {
   ]);
 
   useEffect(() => {
+    activeRefresh.current = refresh;
     const initial = window.setTimeout(refresh, 0);
     const timer = window.setInterval(refresh, 1800);
     return () => {
+      activeRefresh.current = null;
       window.clearTimeout(initial);
       window.clearInterval(timer);
     };
@@ -1966,7 +1982,6 @@ export default function Home() {
       !activeProjectId ||
       !activeProject?.completed_count
     ) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setProjectSpeakers([]);
       setSelectedSpeakerKeys(new Set());
       speakerSelectionProjectRef.current = "";
@@ -2028,7 +2043,6 @@ export default function Home() {
       !activeProjectId ||
       !activeProject?.completed_count
     ) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTranscriptText("");
       setTranscriptTextKey("");
       return;
@@ -2192,7 +2206,6 @@ export default function Home() {
     // Пришедшая расшифровка — это и есть внешнее событие, ради которого поле
     // вообще связано с сервисом: другого способа дописать её в конец, не трогая
     // набранное руками, нет.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDictationText((current) =>
       pending.reduce(
         (text, item) =>
@@ -2223,16 +2236,17 @@ export default function Home() {
   }, [dictationText]);
 
   useEffect(() => {
-    if (!dictationDirty || !currentDictationId || currentDictationBusy) return;
+    if (!dictationDirty || !currentDictationId || currentDictationBusy || confirmingDictation) return;
     const timer = window.setTimeout(async () => {
+      if (confirmInFlightRef.current) return;
       const saved = dictationText;
-      const response = await fetch(`${API}/dictations/${currentDictationId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: saved }),
-      });
-      if (response.ok && dictationTextRef.current === saved) {
-        setDictationDirty(false);
+      try {
+        const response = await patchDictationDraft(currentDictationId, saved);
+        if (response.ok && loadedDictationRef.current === currentDictationId && dictationTextRef.current === saved) {
+          setDictationDirty(false);
+        }
+      } catch {
+        setNotice("Не удалось сохранить текст диктовки");
       }
     }, 700);
     return () => window.clearTimeout(timer);
@@ -2241,6 +2255,7 @@ export default function Home() {
     dictationText,
     currentDictationId,
     currentDictationBusy,
+    confirmingDictation,
   ]);
 
   useEffect(() => {
@@ -2612,15 +2627,28 @@ export default function Home() {
     }
   }
 
-  async function saveCurrentDictationText() {
-    if (!currentDictation) return false;
-    const response = await fetch(`${API}/dictations/${currentDictation.id}`, {
+  async function patchDictationDraft(id: string, text: string) {
+    // Более ранний медленный PATCH не должен перезаписать следующую правку.
+    const request = Promise.allSettled(dictationSavesRef.current).then(() => fetch(`${API}/dictations/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: dictationText }),
-    });
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
+      body: JSON.stringify({ text }),
+    }));
+    dictationSavesRef.current.add(request);
+    try {
+      return await request;
+    } finally {
+      dictationSavesRef.current.delete(request);
+    }
+  }
+
+  async function saveCurrentDictationText() {
+    if (!currentDictation || confirmInFlightRef.current) return false;
+    try {
+      const response = await patchDictationDraft(currentDictation.id, dictationText);
+      if (!response.ok) throw new Error(await errorMessage(response));
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "Не удалось сохранить текст диктовки");
       return false;
     }
     if (loadedDictationRef.current === currentDictation.id && dictationTextRef.current === dictationText) {
@@ -2658,36 +2686,49 @@ export default function Home() {
     copyAfterConfirm = false,
   ) {
     const clean = text.trim();
+    if (confirmInFlightRef.current) return false;
     if (!clean) {
       setNotice("Сначала надиктуйте или введите текст");
       return false;
     }
-    const response = await fetch(`${API}/dictations/${message.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        status: "confirmed",
-      }),
-    });
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
+    confirmInFlightRef.current = true;
+    setConfirmingDictation(true);
+    setAutoConfirmDictationId(id => id === message.id ? "" : id);
+    try {
+      await Promise.allSettled(dictationSavesRef.current);
+      const response = await fetch(`${API}/dictations/${message.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, status: "confirmed" }),
+      });
+      if (!response.ok) throw new Error(await errorMessage(response));
+      let next: DictationMessage | null = null;
+      if (loadedDictationRef.current === message.id) {
+        const nextResponse = await fetch(`${API}/dictations`, { method: "POST" });
+        if (!nextResponse.ok) throw new Error(await errorMessage(nextResponse));
+        next = (await nextResponse.json()) as DictationMessage;
+      }
+      // Более ранний опрос мог ещё не увидеть новый черновик.
+      refreshApplied.current = ++refreshStarted.current;
+      setDictations(current => {
+        const updated = current.map(item => item.id === message.id
+          ? { ...item, text, status: "confirmed" as const } : item);
+        return next ? [next, ...updated.filter(item => item.id !== next.id)] : updated;
+      });
+      if (next && loadedDictationRef.current === message.id) {
+        setActiveDictationId(next.id);
+        loadedDictationRef.current = next.id;
+        setDictationMergedIds(new Set());
+        setDictationText("");
+        setDictationDirty(false);
+      }
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "Не удалось подтвердить диктовку");
       return false;
+    } finally {
+      confirmInFlightRef.current = false;
+      setConfirmingDictation(false);
     }
-    const nextResponse = await fetch(`${API}/dictations`, { method: "POST" });
-    if (!nextResponse.ok) {
-      setNotice(await errorMessage(nextResponse));
-      return false;
-    }
-    const next = (await nextResponse.json()) as DictationMessage;
-    setDictations(current => [next, ...current.filter(item => item.id !== next.id)]);
-    setActiveDictationId(next.id);
-    // Сообщение ушло в историю: поле и отметки вписанных расшифровок начинают
-    // новую диктовку с чистого листа.
-    loadedDictationRef.current = next.id;
-    setDictationMergedIds(new Set());
-    setDictationText("");
-    setDictationDirty(false);
     if (copyAfterConfirm) {
       await writeClipboardText(
         clean,
@@ -2705,12 +2746,13 @@ export default function Home() {
     await confirmDictationMessage(currentDictation, dictationText, true);
   }
 
+  const confirmFromEffect = useEffectEvent(confirmDictationMessage);
   useEffect(() => {
-    if (!autoConfirmDictationId || autoConfirmInFlightRef.current) return;
+    if (!autoConfirmDictationId || confirmInFlightRef.current) return;
     const message = dictations.find(
       (item) => item.id === autoConfirmDictationId,
     );
-    if (!message) return;
+    if (!message || message.status !== "draft") return;
     const busy = message.fragments.some(
       (fragment) =>
         fragment.status === "queued" || fragment.status === "processing",
@@ -2746,17 +2788,14 @@ export default function Home() {
     const text = current ? dictationText : message.text;
     if (!text.trim()) return;
 
-    autoConfirmInFlightRef.current = true;
-    void (async () => {
-      try {
-        await confirmDictationMessage(message, text, true);
-      } finally {
-        autoConfirmInFlightRef.current = false;
-        setAutoConfirmDictationId("");
-      }
-    })();
+    let active = true;
+    queueMicrotask(async () => {
+      if (active) await confirmFromEffect(message, text, true);
+    });
+    return () => { active = false; };
   }, [
     autoConfirmDictationId,
+    confirmingDictation,
     dictations,
     savingRecording,
     currentDictationId,
@@ -2869,24 +2908,28 @@ export default function Home() {
 
   async function createProject(event: FormEvent) {
     event.preventDefault();
-    const response = await fetch(`${API}/projects`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: newProjectTitle.trim() || null,
-        folder_id: newProjectFolder || null,
-      }),
-    });
-    if (!response.ok) {
-      setNotice(await errorMessage(response));
-      return;
+    if (projectCreationPending.current) return;
+    projectCreationPending.current = true;
+    setCreatingProject(true);
+    try {
+      const response = await fetch(`${API}/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newProjectTitle.trim() || null, folder_id: newProjectFolder || null }),
+      });
+      if (!response.ok) throw new Error(await errorMessage(response));
+      const project = (await response.json()) as Project;
+      setCreateOpen(false);
+      setNewProjectTitle("");
+      setNewProjectFolder("");
+      await refresh();
+      openProject(project.id);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось создать проект");
+    } finally {
+      projectCreationPending.current = false;
+      setCreatingProject(false);
     }
-    const project = (await response.json()) as Project;
-    setCreateOpen(false);
-    setNewProjectTitle("");
-    setNewProjectFolder("");
-    await refresh();
-    openProject(project.id);
   }
 
   async function shutdownService() {
@@ -3167,9 +3210,8 @@ export default function Home() {
       openProject(project.id);
       setNotice("Проект создан, исходники остаются на своих местах");
     } catch (error) {
-      if (project) {
-        await fetch(`${API}/projects/${project.id}`, { method: "DELETE" });
-      }
+      // The picker may have attached files before its response was lost.
+      if (project) openProject(project.id);
       setNotice(error instanceof Error ? error.message : "Неизвестная ошибка");
     } finally {
       setQuickUploading(false);
@@ -3340,7 +3382,7 @@ export default function Home() {
       const response = await fetch(`${API}/media`, { method: "POST", body });
       if (!response.ok) throw new Error(await errorMessage(response));
       const count = files.length;
-      setFiles([]);
+      setFiles(current => current.filter(file => !files.includes(file)));
       setNotice(
         `${count} ${count === 1 ? "файл проверен" : "файла проверены"}. Выберите дорожки и поставьте в очередь.`,
       );
@@ -3937,7 +3979,17 @@ export default function Home() {
 
   async function cancelQueueItem(item: QueueItem) {
     if (item.kind === "job") {
-      const job = jobs.find((candidate) => candidate.id === item.id);
+      let job = jobs.find((candidate) => candidate.id === item.id);
+      if (!job && item.status === "processing") {
+        try {
+          const response = await fetch(`${API}/jobs/${item.id}`, { cache: "no-store" });
+          if (!response.ok) throw new Error(await errorMessage(response));
+          job = await response.json() as Job;
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : "Не удалось загрузить задание");
+          return;
+        }
+      }
       if (job) {
         await cancelJob(job);
         return;
@@ -6182,7 +6234,7 @@ export default function Home() {
                       className="record-start"
                       type="button"
                       onClick={startDictationRecording}
-                      disabled={savingRecording || startingRecording}
+                      disabled={savingRecording || startingRecording || confirmingDictation}
                     >
                       <span>●</span>
                       {startingRecording
@@ -6197,12 +6249,13 @@ export default function Home() {
 
               <section
                 className="dictation-editor-card"
-                aria-busy={currentDictationBusy}
+                aria-busy={currentDictationBusy || confirmingDictation}
               >
                 <textarea
                   className="dictation-textarea"
                   ref={dictationTextareaRef}
                   value={dictationText}
+                  readOnly={confirmingDictation}
                   // Поле не блокируется на время распознавания: расшифровка
                   // дописывается в конец и набранному не мешает.
                   onChange={(event) => {
@@ -6322,7 +6375,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => copyDictationText()}
-                    disabled={!dictationText.trim()}
+                    disabled={!dictationText.trim() || confirmingDictation}
                   >
                     ⧉ Копировать
                   </button>
@@ -6333,6 +6386,8 @@ export default function Home() {
                     disabled={
                       recording ||
                       savingRecording ||
+                      startingRecording ||
+                      confirmingDictation ||
                       currentDictationBusy ||
                       !dictationText.trim()
                     }
@@ -8426,7 +8481,7 @@ export default function Home() {
               </strong>
             </div>
             <div className="modal-actions">
-              <button className="primary-button" type="submit">
+              <button className="primary-button" type="submit" disabled={creatingProject}>
                 Создать проект
               </button>
             </div>

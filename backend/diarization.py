@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub.constants import HF_HUB_CACHE
+
 from . import cancellation, runtime, storage, remote_client
 
 
@@ -32,13 +34,7 @@ ENGINE_TITLES = {"pyannote": "Pyannote", "nemotron": "Nemotron 3"}
 NEMOTRON_MODEL_ID = "nvidia/Nemotron-3-Diarization"
 NEMOTRON_FILES = ("config.json", "processor_config.json", "model.safetensors")
 NEMOTRON_WORKER_PATH = ROOT / "backend" / "nemotron_worker.py"
-NEMOTRON_MODEL_CACHE = (
-    Path.home()
-    / ".cache"
-    / "huggingface"
-    / "hub"
-    / "models--nvidia--Nemotron-3-Diarization"
-)
+NEMOTRON_MODEL_CACHE = Path(HF_HUB_CACHE) / "models--nvidia--Nemotron-3-Diarization"
 # Для показа прогресса загрузки: model.safetensors весит 397 МБ, остальное —
 # пара килобайт.
 NEMOTRON_DOWNLOAD_BYTES = 397_300_000
@@ -104,14 +100,8 @@ def _nemotron_runtime() -> Path | None:
 
 
 def _nemotron_model_ready() -> bool:
-    snapshots = NEMOTRON_MODEL_CACHE / "snapshots"
-    if not snapshots.exists():
-        return False
-    return any(
-        all((item / name).exists() for name in NEMOTRON_FILES)
-        for item in snapshots.iterdir()
-        if item.is_dir()
-    )
+    snapshot = NEMOTRON_MODEL_CACHE / "snapshots" / runtime.NEMOTRON_REVISION
+    return all((snapshot / name).is_file() for name in NEMOTRON_FILES)
 
 
 def _nemotron_ready() -> bool:
@@ -120,13 +110,7 @@ def _nemotron_ready() -> bool:
         and NEMOTRON_WORKER_PATH.exists()
         and _nemotron_model_ready()
     )
-SHARED_MODEL_CACHE = (
-    Path.home()
-    / ".cache"
-    / "huggingface"
-    / "hub"
-    / "models--pyannote--speaker-diarization-community-1"
-)
+SHARED_MODEL_CACHE = Path(HF_HUB_CACHE) / "models--pyannote--speaker-diarization-community-1"
 WORKER_PATH = ROOT / "backend" / "diarization_worker.py"
 
 

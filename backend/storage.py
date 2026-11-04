@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1183,7 +1184,7 @@ def job_audio_path(job: dict[str, Any]) -> Path:
     existing = job.get("extracted_audio_path")
     if existing:
         return Path(existing)
-    return extracted_audio_dir(job["session_id"]) / f"{job_file_base(job)}.wav"
+    return unique_child(extracted_audio_dir(job["session_id"]), job_file_base(job), ".wav")
 
 
 def set_extracted_audio(job_id: str, path: Path | None) -> None:
@@ -1220,6 +1221,15 @@ def drop_extracted_audio(job_id: str) -> bool:
 def temporary_dir() -> Path:
     path = Path(get_settings()["temporary_storage_root"])
     path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def processing_temp_dir() -> Path:
+    root = temporary_dir().resolve()
+    path = root / ".whisper-processing"
+    if path.resolve() != path:
+        raise OSError("Временная папка обработки перенаправлена")
+    path.mkdir(exist_ok=True)
     return path
 
 
@@ -1408,10 +1418,12 @@ def create_media(
     metadata: dict[str, Any],
     source_path: Path | None = None,
     storage_mode: str = "managed",
+    *,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     if storage_mode not in {"managed", "reference"}:
         raise ValueError("Некорректный режим хранения")
-    with connect() as db:
+    with (nullcontext(connection) if connection is not None else connect()) as db:
         db.execute(
             """
             INSERT INTO media_uploads(
@@ -1439,7 +1451,20 @@ def create_media(
             "UPDATE sessions SET updated_at = ? WHERE id = ?",
             (utc_now(), session_id),
         )
-    return get_media(media_id)
+        row = db.execute("SELECT * FROM media_uploads WHERE id = ?", (media_id,)).fetchone()
+        return _media_from_row(row)
+
+
+def register_media_files(
+    session_id: str, files: list[tuple[str, Path, dict[str, Any]]], storage_mode: str
+) -> list[dict[str, Any]]:
+    with connect() as db:
+        return [
+            create_media(uuid.uuid4().hex, session_id, name, path, metadata,
+                         source_path=path if storage_mode == "reference" else None,
+                         storage_mode=storage_mode, connection=db)
+            for name, path, metadata in files
+        ]
 
 
 def _media_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -1537,8 +1562,9 @@ def create_job(
     return get_job(job_id)
 
 
-def update_job(job_id: str, **values: Any) -> None:
-    if not values:
+def update_job(job_id: str, *, connection: sqlite3.Connection | None = None,
+               options: dict[str, Any] | None = None, **values: Any) -> None:
+    if not values and options is None:
         return
     allowed = {
         "status",
@@ -1555,9 +1581,11 @@ def update_job(job_id: str, **values: Any) -> None:
     invalid = set(values) - allowed
     if invalid:
         raise ValueError(f"Unsupported job fields: {sorted(invalid)}")
+    if options is not None:
+        values["options_json"] = json.dumps(options, ensure_ascii=False)
     columns = ", ".join(f"{key} = ?" for key in values)
     params = list(values.values()) + [job_id]
-    with connect() as db:
+    with (nullcontext(connection) if connection is not None else connect()) as db:
         db.execute(f"UPDATE jobs SET {columns} WHERE id = ?", params)
         if "status" in values:
             db.execute(
@@ -1570,15 +1598,26 @@ def update_job(job_id: str, **values: Any) -> None:
 
 
 def add_output(job_id: str, kind: str, path: Path) -> None:
+    add_outputs(job_id, {kind: path})
+
+
+def add_outputs(
+    job_id: str, paths: dict[str, Path], *, reset_speaker_aliases: bool = False,
+    completion: dict[str, Any] | None = None,
+) -> None:
     with connect() as db:
-        db.execute(
+        db.executemany(
             """
             INSERT INTO outputs(job_id, kind, path)
             VALUES (?, ?, ?)
             ON CONFLICT(job_id, kind) DO UPDATE SET path = excluded.path
             """,
-            (job_id, kind, str(path)),
+            [(job_id, kind, str(path)) for kind, path in paths.items()],
         )
+        if reset_speaker_aliases:
+            db.execute("DELETE FROM speaker_aliases WHERE job_id = ?", (job_id,))
+        if completion is not None:
+            update_job(job_id, connection=db, **completion)
 
 
 def list_speaker_aliases(project_id: str) -> dict[tuple[str, str], str]:
@@ -1655,7 +1694,7 @@ def get_job(job_id: str) -> dict[str, Any]:
         return _job_from_row(db, row)
 
 
-def list_jobs(session_id: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+def list_jobs(session_id: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
     with connect() as db:
         if session_id:
             rows = db.execute(
@@ -1665,14 +1704,32 @@ def list_jobs(session_id: str | None = None, limit: int = 1000) -> list[dict[str
                 ORDER BY position, rowid
                 LIMIT ?
                 """,
-                (session_id, limit),
+                (session_id, -1 if limit is None else limit),
             ).fetchall()
         else:
             rows = db.execute(
                 "SELECT * FROM jobs ORDER BY rowid DESC LIMIT ?",
-                (limit,),
+                (1000 if limit is None else limit,),
             ).fetchall()
         return [_job_from_row(db, row) for row in rows]
+
+
+def queue_items() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Очередь охватывает и старые файлы, повторно поставленные в обработку."""
+    with connect() as db:
+        jobs = [dict(row) for row in db.execute(
+            """SELECT j.id, j.session_id, j.original_name, j.status, j.options_json,
+                      s.name AS project_name
+               FROM jobs j JOIN sessions s ON s.id = j.session_id
+               WHERE j.status IN ('queued', 'processing') ORDER BY j.rowid DESC"""
+        )]
+        fragments = [dict(row) for row in db.execute(
+            """SELECT id, position, status FROM dictation_fragments
+               WHERE status IN ('queued', 'processing') ORDER BY rowid"""
+        )]
+    for job in jobs:
+        job["options"] = json.loads(job.pop("options_json"))
+    return jobs, fragments
 
 
 def cancel_queued_job(job_id: str) -> str:
@@ -1717,6 +1774,7 @@ def cancel_queued_job(job_id: str) -> str:
 def requeue_job(job_id: str) -> dict[str, Any]:
     """Вернуть остановленную или неудачную задачу в конец очереди."""
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT status, session_id FROM jobs WHERE id = ?", (job_id,)
         ).fetchone()
@@ -1724,6 +1782,8 @@ def requeue_job(job_id: str) -> dict[str, Any]:
             raise KeyError(job_id)
         if str(row["status"]) in {"queued", "processing"}:
             raise RuntimeError("Задание уже в очереди")
+        if str(row["status"]) == "completed":
+            raise RuntimeError("Для готового файла используйте повторное распознавание")
         db.execute(
             """
             UPDATE jobs
@@ -1749,6 +1809,7 @@ def prepare_job_rerun(
     if rerun_mode not in {"transcribe", "diarization"}:
         raise ValueError("Некорректный режим повторной обработки")
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute(
             "SELECT status, session_id, options_json FROM jobs WHERE id = ?",
             (job_id,),

@@ -11,6 +11,7 @@ def job(job_id: str, status: str, name: str) -> dict:
     return {
         "id": job_id,
         "session_id": "project-1",
+        "project_name": "Проверка очереди",
         "original_name": name,
         "status": status,
         "options": {},
@@ -18,36 +19,34 @@ def job(job_id: str, status: str, name: str) -> dict:
 
 
 class QueueControlTests(unittest.TestCase):
+    def test_stale_project_queue_entry_cannot_replace_speaker_only_rerun(self):
+        current = {"status": "queued", "options": {"_rerun_mode": "diarization"}}
+        with patch.object(backend_app.storage, "get_job", return_value=current):
+            self.assertFalse(backend_app._still_queued("project", "same-job"))
+            self.assertTrue(backend_app._still_queued("diarization", "same-job"))
+
+    def test_rejected_retry_preserves_pending_cancellation(self):
+        task_id = "cancelled-while-running"
+        backend_app.cancellation.request(task_id)
+        self.addCleanup(backend_app.cancellation.release, task_id)
+        with patch.object(backend_app.storage, "requeue_job", side_effect=RuntimeError("В работе")):
+            with self.assertRaises(backend_app.HTTPException) as caught:
+                backend_app.requeue_job(task_id)
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertTrue(backend_app.cancellation.is_requested(task_id))
+
     @patch.object(backend_app.cancellation, "requested_ids", return_value=set())
-    @patch.object(backend_app.storage, "list_dictation_messages")
-    @patch.object(backend_app.storage, "list_sessions")
-    @patch.object(backend_app.storage, "list_jobs")
+    @patch.object(backend_app.storage, "queue_items")
     def test_overview_uses_real_priority_queue_order(
         self,
-        list_jobs,
-        list_sessions,
-        list_dictation_messages,
+        queue_items,
         _requested_ids,
     ) -> None:
-        list_jobs.return_value = [
+        queue_items.return_value = ([
             job("active", "processing", "Сейчас.mp3"),
             job("regular", "queued", "Обычный.mp3"),
             job("promoted", "queued", "Срочный.mp3"),
-        ]
-        list_sessions.return_value = [
-            {"id": "project-1", "name": "Проверка очереди"},
-        ]
-        list_dictation_messages.return_value = [
-            {
-                "fragments": [
-                    {
-                        "id": "dictation",
-                        "position": 2,
-                        "status": "queued",
-                    },
-                ],
-            },
-        ]
+        ], [{"id": "dictation", "position": 2, "status": "queued"}])
 
         # Очередей теперь две, и диктовка идёт впереди даже поднятого вручную
         # файла: её обрабатывает отдельный поток, она не ждёт файлы вообще.

@@ -61,8 +61,8 @@ def restore(segments: list[dict], job_id: str) -> list[dict]:
     if python is None:
         raise RuntimeError("Для пунктуации нужна установленная среда разметки Whisper")
     result = copy.deepcopy(segments)
-    input_path = storage.temporary_dir() / f"{job_id}-punctuation-in.json"
-    output_path = storage.temporary_dir() / f"{job_id}-punctuation-out.json"
+    input_path = storage.processing_temp_dir() / f"{job_id}-punctuation-in.json"
+    output_path = storage.processing_temp_dir() / f"{job_id}-punctuation-out.json"
     input_path.parent.mkdir(parents=True, exist_ok=True)
     boundaries = [index + 1 == len(result) or
                   float(result[index+1]["start"]) - float(item["end"]) >= 1.5

@@ -1,4 +1,9 @@
 # Pure helpers: safe to dot-source from PowerShell 5.1 and installer tests.
+function Test-FrontendBuild([string]$Root) {
+    return (Test-Path -LiteralPath (Join-Path $Root "dist\client\assets") -PathType Container) -and
+        (Test-Path -LiteralPath (Join-Path $Root "dist\server\index.js") -PathType Leaf)
+}
+
 function Get-InstallDevice([string]$Requested, [bool]$HasNvidia) {
     if ($Requested -eq "cuda" -and -not $HasNvidia) {
         throw "NVIDIA GPU/driver not found. Install the driver or use -Device cpu."

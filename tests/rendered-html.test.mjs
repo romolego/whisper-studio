@@ -128,7 +128,8 @@ test("keeps durable local dictation controls in the UI", async () => {
   );
   // Автосохранение по зелёной кнопке отправляет в историю текст поля правки
   // вместе с ручными правками, а не серверную копию.
-  assert.match(page, /await confirmDictationMessage\(message, text, true\)/);
+  assert.match(page, /const confirmFromEffect = useEffectEvent\(confirmDictationMessage\)/);
+  assert.match(page, /await confirmFromEffect\(message, text, true\)/);
   assert.match(page, /const text = current \? dictationText : message\.text;/);
   assert.match(page, /Запись отменена/);
   assert.match(page, /Подключаю микрофон…/);

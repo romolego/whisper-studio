@@ -184,7 +184,7 @@ def write(project_id: str, kind: str, payload: TextEdit):
 async def upload(project_id: str, revision: int = Form(ge=0), file: UploadFile = File(), kind: str = "diagram"):
     from starlette.concurrency import run_in_threadpool
     _call(storage.get_session, project_id)
-    target = storage.temporary_dir() / f"scheme-{uuid.uuid4().hex}.upload"
+    target = storage.processing_temp_dir() / f"scheme-{uuid.uuid4().hex}.upload"
     def receive():
         try:
             with target.open("wb") as output:

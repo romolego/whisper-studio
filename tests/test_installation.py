@@ -47,7 +47,8 @@ class DeviceSelectionTests(unittest.TestCase):
 
     def test_whisper_cpu_mode_never_attempts_gpu(self):
         self.config.write_text('{"device":"cpu"}')
-        (self.root / "model.bin").touch()
+        for name in runtime.TURBO_MODEL_FILES:
+            (self.root / name).touch()
         transcriber.release_models()
         self.addCleanup(transcriber.release_models)
         with patch.object(transcriber, "RUSSIAN_MODEL_DIR", self.root):
@@ -59,7 +60,8 @@ class DeviceSelectionTests(unittest.TestCase):
 
     def test_explicit_gpu_failure_is_not_reported_as_cpu_success(self):
         self.config.write_text('{"device":"cuda"}')
-        (self.root / "model.bin").touch()
+        for name in runtime.TURBO_MODEL_FILES:
+            (self.root / name).touch()
         transcriber.release_models()
         self.addCleanup(transcriber.release_models)
         with patch.object(transcriber, "RUSSIAN_MODEL_DIR", self.root):
@@ -76,6 +78,46 @@ class DeviceSelectionTests(unittest.TestCase):
 
 
 class FreshConfigurationTests(unittest.TestCase):
+    def test_nemotron_ready_requires_pinned_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(diarization, "NEMOTRON_MODEL_CACHE", Path(folder)):
+            snapshots = Path(folder) / "snapshots"
+            other = snapshots / ("a" * 40)
+            other.mkdir(parents=True)
+            for name in diarization.NEMOTRON_FILES:
+                (other / name).touch()
+            self.assertFalse(diarization._nemotron_model_ready())
+            pinned = snapshots / runtime.NEMOTRON_REVISION
+            pinned.mkdir()
+            for name in diarization.NEMOTRON_FILES:
+                (pinned / name).touch()
+            self.assertTrue(diarization._nemotron_model_ready())
+
+    def test_interrupted_whisper_snapshot_only_fetches_missing_sidecars(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            english, russian = root / "turbo", root / "turbo-russian"
+            for directory, missing in ((english, "tokenizer.json"), (russian, "config.json")):
+                directory.mkdir()
+                for name in runtime.TURBO_MODEL_FILES:
+                    if name != missing:
+                        (directory / name).write_bytes(b"existing")
+
+            def download(*, allow_patterns, local_dir, **kwargs):
+                for name in allow_patterns:
+                    path = Path(local_dir) / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"repaired")
+
+            with patch.multiple(transcriber, MODELS_DIR=root, ENGLISH_MODEL_DIR=english, RUSSIAN_MODEL_DIR=russian), \
+                 patch.object(transcriber, "snapshot_download", side_effect=download) as snapshot:
+                transcriber.prepare_model_files()
+                transcriber.prepare_model_files()
+            self.assertEqual([call.kwargs["allow_patterns"] for call in snapshot.call_args_list],
+                             [["tokenizer.json"], ["ct2_int8_float16/config.json"]])
+            for directory, name in ((english, "tokenizer.json"), (russian, "config.json")):
+                self.assertEqual((directory / name).read_bytes(), b"repaired")
+                self.assertEqual((directory / "model.bin").read_bytes(), b"existing")
+
     def test_fresh_nemotron_defaults_and_existing_choices_preserved(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -128,12 +170,53 @@ class NvidiaWheelTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell installer")
 class PowerShellInstallerTests(unittest.TestCase):
-    def run_isolated_install(self, device, *, fail_compute=False):
+    @unittest.skipUnless(shutil.which("node.exe"), "Node required for frontend launch")
+    def test_start_from_spaced_folder_and_without_frontend(self):
+        with tempfile.TemporaryDirectory(prefix="whisper studio ") as folder:
+            root = Path(folder)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copy2(ROOT / "scripts/install_helpers.ps1", scripts)
+            launcher = (ROOT / "scripts/start.ps1").read_text(encoding="utf-8-sig")
+            # Isolate backend discovery and readiness. The frontend argument,
+            # executable launch, working directory and output are all real.
+            mocks = """
+function Get-ServiceProcess($file, $service) {
+    if ($service -eq 'backend') { return @{ ProcessId = $PID } }
+}
+function Wait-ForUrl($url, $seconds) { return $true }
+"""
+            launcher = launcher.replace("$backendStartMutex =", mocks + "\n$backendStartMutex =", 1)
+            launcher = launcher.replace("Local\\WebinarAnalyzerWhisperBackend8765Start", f"Local\\Test-{root.name}")
+            (scripts / "start.ps1").write_text(launcher, encoding="utf-8-sig")
+            python = root / ".venv/Scripts/python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(scripts / "start.ps1"), "-NoBrowser"]
+            subprocess.run(command + ["-BackendOnly"], check=True, capture_output=True)
+            (root / "dist/client/assets").mkdir(parents=True)
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            (root / "dist/server").mkdir()
+            (root / "dist/server/index.js").touch()
+            (scripts / "start_frontend.mjs").write_text('console.log("frontend-ok")', encoding="utf-8")
+            subprocess.run(command, capture_output=True, check=True)
+            # The launcher normally waits for /health; our fixture exits instead.
+            import time
+            deadline = time.monotonic() + 5
+            output = root / "logs/frontend.out.log"
+            while time.monotonic() < deadline and "frontend-ok" not in output.read_text():
+                time.sleep(.05)
+            self.assertIn("frontend-ok", output.read_text())
+
+    def run_isolated_install(self, device, *, fail_compute=False, partial_frontend=False):
         """Exercise the real orchestration while replacing downloads/system installs."""
         with tempfile.TemporaryDirectory(prefix="whisper setup ") as folder:
             root = Path(folder)
             scripts = root / "scripts"
             scripts.mkdir()
+            if partial_frontend:
+                (root / "node_modules/vinext").mkdir(parents=True)
+                (root / "dist/client/assets").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/install_helpers.ps1", scripts)
             installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8-sig")
             installer = installer.replace(
@@ -170,8 +253,8 @@ function Invoke-External {
             fixture.write_text(installer, encoding="utf-8-sig")
             result = subprocess.run([
                 "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(fixture),
-                "-Device", device, "-CudaVariant", "cu126", "-SkipFrontend",
-            ], capture_output=True, text=True)
+                "-Device", device, "-CudaVariant", "cu126", *([] if partial_frontend else ["-SkipFrontend"]),
+            ], capture_output=True, encoding="utf-8")
             calls = [json.loads(line) for line in (root / "calls.jsonl").read_text(encoding="utf-8-sig").splitlines()]
             return result, calls
 
@@ -195,11 +278,19 @@ function Invoke-External {
         result, _ = self.run_isolated_install("cuda", fail_compute=True)
         self.assertEqual(result.returncode, 1)
 
+    @unittest.skipUnless(shutil.which("npm.cmd"), "npm required for frontend installation")
+    def test_install_resumes_incomplete_node_modules_and_build(self):
+        result, calls = self.run_isolated_install("cpu", partial_frontend=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [call["arguments"] for call in calls if call["kind"] == "process"]
+        self.assertIn(["ci", "--no-audit", "--no-fund"], commands)
+        self.assertIn(["run", "build"], commands)
+
     def test_cpu_plan_needs_no_cuda_and_makes_no_installation_changes(self):
         result = subprocess.run([
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
             str(ROOT / "scripts/install.ps1"), "-Device", "cpu", "-Plan",
-        ], capture_output=True, text=True, check=True)
+        ], capture_output=True, encoding="utf-8", check=True)
         plan = json.loads(result.stdout)
         self.assertEqual(plan["selected_device"], "cpu")
         self.assertEqual(plan["torch_variant"], "cpu")

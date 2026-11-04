@@ -7,6 +7,7 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "install_helpers.ps1")
 $runtimeDir = Join-Path $projectRoot "run"
 $logsDir = Join-Path $projectRoot "logs"
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
@@ -43,7 +44,7 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "Среда Python не найдена. Запустите «Установить Whisper.bat»."
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "dist"))) {
+if (-not $BackendOnly -and -not (Test-FrontendBuild $projectRoot)) {
     throw "Веб-интерфейс ещё не собран. Запустите «Установить Whisper.bat»."
 }
 
@@ -366,7 +367,7 @@ if (-not $frontendProcess) {
         $frontend = Start-Process `
             -FilePath $nodePath `
             -ArgumentList @(
-                (Join-Path $projectRoot "scripts\start_frontend.mjs")
+                (ConvertTo-NativeArgument (Join-Path $projectRoot "scripts\start_frontend.mjs"))
             ) `
             -WorkingDirectory $projectRoot `
             -RedirectStandardOutput (Join-Path $logsDir "frontend.out.log") `

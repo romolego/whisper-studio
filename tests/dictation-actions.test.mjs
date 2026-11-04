@@ -7,6 +7,7 @@ import ts from "typescript";
 const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const page = ts.createSourceFile("page.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 function action(name, state) {
+  if (name === "saveCurrentDictationText") state.patchDictationDraft = action("patchDictationDraft", state);
   let declaration;
   function visit(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text === name) declaration = node;
@@ -25,11 +26,20 @@ function deferred() {
   return { promise, resolve };
 }
 
+function networkState() {
+  return {
+    confirmInFlightRef: { current: false }, dictationSavesRef: { current: new Set() },
+    refreshApplied: { current: 0 }, refreshStarted: { current: 0 },
+    setConfirmingDictation: () => {}, setAutoConfirmDictationId: () => {},
+  };
+}
+
 test("confirming a dictation never clears text typed into the next draft during refresh", async () => {
   const gate = deferred(), started = deferred();
   let text = "Confirmed text", dirty = true;
   let messages = [{ id: "old", status: "draft", text }];
   const state = {
+    ...networkState(),
     API: "/api", loadedDictationRef: { current: "old" },
     fetch: async url => new Response(JSON.stringify(url === "/api/dictations" ? { id: "next" } : {})),
     setDictations: update => { messages = update(messages); },
@@ -54,6 +64,7 @@ test("copy-save acknowledges unchanged text but leaves another message's draft d
   for (const selectedId of ["draft", "other"]) {
     let dirty = true;
     const state = {
+      ...networkState(),
       API: "/api", currentDictation: { id: "draft" }, dictationText: "Same text",
       dictationTextRef: { current: "Same text" }, loadedDictationRef: { current: selectedId },
       fetch: async () => new Response("{}"), setDictationDirty: value => { dirty = value; }, setNotice: () => {},
@@ -67,6 +78,7 @@ test("copy-save acknowledgement cannot mark newer dictation edits as saved", asy
   const gate = deferred();
   let dirty = true;
   const state = {
+    ...networkState(),
     API: "/api", currentDictation: { id: "draft" }, dictationText: "Copied version",
     dictationTextRef: { current: "Copied version" }, loadedDictationRef: { current: "draft" },
     fetch: () => gate.promise, setDictationDirty: value => { dirty = value; }, setNotice: () => {},
@@ -76,6 +88,66 @@ test("copy-save acknowledgement cannot mark newer dictation edits as saved", asy
   gate.resolve(new Response("{}"));
   assert.equal(await saving, true);
   assert.equal(dirty, true);
+});
+
+test("a slow draft save cannot overwrite the text of a later save", async () => {
+  const started = deferred(), slow = deferred();
+  let persisted = "";
+  const save = action("patchDictationDraft", {
+    ...networkState(), API: "/api",
+    fetch: async (_, options) => {
+      const { text } = JSON.parse(options.body);
+      if (text === "Earlier") { started.resolve(); await slow.promise; }
+      persisted = text;
+      return new Response("{}");
+    },
+  });
+  const first = save("draft", "Earlier");
+  await started.promise;
+  const second = save("draft", "Latest");
+  await new Promise(resolve => setImmediate(resolve));
+  slow.resolve();
+  await Promise.all([first, second]);
+  assert.equal(persisted, "Latest");
+});
+
+test("confirmation drains pending saves, guards both requests and releases the next editor before clipboard", async () => {
+  const prior = deferred(), patched = deferred(), created = deferred(), copied = deferred();
+  const patchStarted = deferred(), postStarted = deferred(), copyStarted = deferred();
+  const sent = [];
+  let field = "Submitted", readOnly = false;
+  const state = {
+    ...networkState(), API: "/api", loadedDictationRef: { current: "old" },
+    fetch: async (_, options) => {
+      sent.push(options.method);
+      if (options.method === "PATCH") { patchStarted.resolve(); return patched.promise; }
+      postStarted.resolve(); return created.promise;
+    },
+    setConfirmingDictation: locked => { readOnly = locked; },
+    setDictations: () => {}, setActiveDictationId: () => {}, setDictationMergedIds: () => {},
+    setDictationDirty: () => {}, setDictationText: text => { field = text; },
+    writeClipboardText: async () => { copyStarted.resolve(); await copied.promise; },
+    refresh: async () => {},
+  };
+  state.dictationSavesRef.current.add(prior.promise);
+  const confirm = action("confirmDictationMessage", state);
+  const saving = confirm({ id: "old" }, field, true);
+  assert.equal(readOnly, true);
+  assert.deepEqual(sent, []);
+  prior.resolve(); await patchStarted.promise;
+  assert.equal(await confirm({ id: "old" }, field, true), false);
+  patched.resolve(new Response("{}")); await postStarted.promise;
+  assert.equal(readOnly, true);
+  assert.equal(await confirm({ id: "old" }, field, true), false);
+  created.resolve(new Response(JSON.stringify({ id: "next" }))); await copyStarted.promise;
+  assert.equal(state.loadedDictationRef.current, "next");
+  assert.equal(readOnly, false);
+  field = "Typed before clipboard permission";
+  copied.resolve();
+  assert.equal(await saving, true);
+  assert.deepEqual(sent, ["PATCH", "POST"]);
+  assert.equal(field, "Typed before clipboard permission");
+  assert.match(source, /ref=\{dictationTextareaRef\}[\s\S]{0,150}readOnly=\{confirmingDictation\}/);
 });
 
 test("history copy uses the visible edit, including unsaved and empty drafts", async () => {

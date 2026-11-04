@@ -17,16 +17,14 @@ export function saveBlob(name: string, blob: Blob) {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
-export async function downloadArtifact(url: string, name: string, serverName = false) {
+export async function downloadArtifact(url: string, name: string) {
   const response = await fetch(url);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || "Не удалось скачать материал");
   }
-  if (serverName) {
-    const encoded = response.headers.get("Content-Disposition")?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-    if (encoded) { try { name = decodeURIComponent(encoded); } catch {} }
-  }
+  const encoded = response.headers.get("Content-Disposition")?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) { try { name = decodeURIComponent(encoded); } catch {} }
   saveBlob(name, await response.blob());
 }
 
@@ -218,7 +216,7 @@ export function PackagePanel({ store, query, defaultInclude, transcriptFormat, o
       const params = new URLSearchParams(query);
       params.set("include_transcript", String(include)); params.set("transcript_format", transcriptFormat);
       const url = `${store.base}/package/${zip ? "zip" : "files"}?${params}`;
-      if (zip) await downloadArtifact(url, "Проект.zip", true);
+      if (zip) await downloadArtifact(url, "Проект.zip");
       else {
         const response = await fetch(url);
         if (!response.ok) { const payload = await response.json(); throw new Error(payload.detail || "Ошибка скачивания"); }

@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from backend import storage, transcriber
 
@@ -123,8 +125,74 @@ class ExtractedAudioTests(unittest.TestCase):
         self.assertFalse(self.extract_calls[0].exists())
         self.assertEqual(
             self.extract_calls[0].parent.resolve(),
-            storage.temporary_dir().resolve(),
+            storage.processing_temp_dir().resolve(),
         )
+
+    def test_final_job_update_failure_rolls_back_rerun_files_options_and_alias(self) -> None:
+        job = self._job()
+        transcriber.transcribe_job(job['id'])
+        before = storage.get_job(job['id'])
+        contents = {kind: Path(path).read_bytes() for kind, path in before['outputs'].items()}
+        self.assertEqual(len(contents), 6)
+        storage.set_speaker_alias(job['session_id'], job['id'], 'SPEAKER_00', 'Имя')
+        storage.prepare_job_rerun(job['id'], {'quality': 'fast'}, 'transcribe')
+        with storage.connect() as db:
+            db.execute("""CREATE TRIGGER fail_final_update BEFORE UPDATE OF status ON jobs
+                WHEN NEW.status='completed' AND json_extract(NEW.options_json, '$.quality')='fast'
+                BEGIN SELECT RAISE(ABORT, 'finalization interrupted'); END""")
+        transcriber.transcribe_job(job['id'])
+        after = storage.get_job(job['id'])
+        self.assertIn('finalization interrupted', after['error'])
+        self.assertEqual(after['status'], 'completed')
+        self.assertEqual(after['options'], before['options'])
+        self.assertEqual(storage.list_speaker_aliases(job['session_id'])[(job['id'], 'SPEAKER_00')], 'Имя')
+        self.assertEqual({kind: Path(path).read_bytes() for kind, path in after['outputs'].items()}, contents)
+
+    def test_directory_sync_failure_keeps_completed_transcription_and_rediarization(self) -> None:
+        job = self._job()
+        transcriber.release_models = lambda: 0
+        transcriber.diarization.assign_speakers = lambda _path, segments, *args, **kwargs: segments
+        with patch.object(storage, 'sync_session_dir', side_effect=OSError('folder unavailable')), self.assertLogs(transcriber.logger):
+            transcriber.transcribe_job(job['id'])
+            first = storage.get_job(job['id'])
+            self.assertEqual(first['status'], 'completed')
+            self.assertIsNone(first['error'])
+            storage.prepare_job_rerun(job['id'], {'diarization': True}, 'diarization')
+            transcriber.diarize_existing_job(job['id'])
+        final = storage.get_job(job['id'])
+        self.assertEqual(final['status'], 'completed')
+        self.assertTrue(final['options']['diarization'])
+        self.assertNotIn('_previous_options', final['options'])
+        self.assertIsNone(final['error'])
+
+    def test_rerun_export_failure_keeps_all_previous_formats(self) -> None:
+        job = self._job()
+        metadata = {"language": "ru", "language_probability": 1, "duration": 1}
+        first = [{"start": 0, "end": 1, "text": "Прежний результат.", "speaker": "SPEAKER_00"}]
+        second = [{"start": 0, "end": 1, "text": "Новый результат.", "speaker": "SPEAKER_00"}]
+        storage.set_speaker_alias(job["session_id"], job["id"], "SPEAKER_00", "Старое имя")
+        transcriber._write_outputs(job, first, metadata)
+        job = storage.get_job(job["id"])
+        paths = [Path(path) for path in job["outputs"].values()]
+        previous = {path: path.read_bytes() for path in paths}
+        with patch.object(transcriber.exporter, "write_docx", side_effect=OSError("DOCX")):
+            with self.assertRaises(OSError):
+                transcriber._write_outputs(job, second, metadata)
+        self.assertEqual({p.name for p in paths if p.read_bytes() != previous[p]}, set())
+
+        with storage.connect() as db:
+            db.execute("""CREATE TRIGGER fail_json BEFORE INSERT ON outputs
+                          WHEN NEW.kind='json' BEGIN SELECT RAISE(ABORT,'test failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            transcriber._write_outputs(job, second, metadata, reset_speaker_aliases=True)
+        self.assertEqual({p.name for p in paths if p.read_bytes() != previous[p]}, set())
+        self.assertEqual(storage.get_job(job["id"])["outputs"], job["outputs"])
+        self.assertTrue(storage.list_speaker_aliases(job["session_id"]))
+        with storage.connect() as db:
+            db.execute("DROP TRIGGER fail_json")
+        transcriber._write_outputs(job, second, metadata, reset_speaker_aliases=True)
+        self.assertFalse(storage.list_speaker_aliases(job["session_id"]))
+        self.assertNotIn("Старое имя", Path(job["outputs"]["txt"]).read_text("utf-8"))
 
     def test_enabled_audio_stays_in_project(self) -> None:
         storage.update_settings({"keep_extracted_audio": "on"})
@@ -139,6 +207,19 @@ class ExtractedAudioTests(unittest.TestCase):
             storage.session_dir(job["session_id"]).resolve(),
             kept.resolve().parents,
         )
+
+    def test_same_name_cannot_overwrite_audio_from_failed_transcription(self) -> None:
+        first = self._job()
+        kept = storage.job_audio_path(first)
+        kept.write_bytes(b"first recording")
+        storage.set_extracted_audio(first["id"], kept)
+        storage.update_job(first["id"], status="failed")
+        second = storage.create_job(first["session_id"], first["original_name"],
+                                    Path(first["stored_path"]), first["options"])
+        next_path = storage.job_audio_path(second)
+        next_path.write_bytes(b"second recording")
+        self.assertEqual(kept.read_bytes(), b"first recording")
+        self.assertEqual(storage.job_audio_path(storage.get_job(first["id"])), kept)
 
     def test_rediarization_reuses_kept_audio(self) -> None:
         """Повторная разметка не извлекает дорожку заново."""

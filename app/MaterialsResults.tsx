@@ -10,7 +10,10 @@ export default function MaterialsResults({ api, projectId, onNotice }: { api: st
   const [open, setOpen] = useState<TextKind | null>(null);
   const [imageId, setImageId] = useState<string | null>(null);
   const saved = store.persisted;
-  if (!saved || (!saved.summary.trim() && !saved.minutes.trim() && !saved.images.length && !Object.values(saved.texts || {}).some(text => text.trim()))) return null;
+  if (!saved) return null;
+  const textKinds = ["summary", "minutes", ...Object.keys(saved.texts || {})]
+    .filter(kind => open === kind || materialText(saved, kind).trim());
+  if (!textKinds.length && !saved.images.length) return null;
   const viewer = store.data?.images.find(image => image.id === imageId);
   const save = (url: string, name: string) => {
     void store.ready().then(() => downloadArtifact(url, name)).catch(reason => onNotice(reason.message));
@@ -22,12 +25,12 @@ export default function MaterialsResults({ api, projectId, onNotice }: { api: st
           if (!response.ok) throw new Error((await response.json()).detail || "Не удалось открыть папку");
         }).catch(reason => onNotice(reason.message));
       }}>Открыть папку</button></div>
-    {["summary", "minutes", ...Object.keys(saved.texts || {})].filter(kind => materialText(saved, kind).trim()).map(kind => {
+    {textKinds.map(kind => {
       const label = kind === "summary" ? "Резюме" : kind === "minutes" ? "Протокол" : saved.definitions?.[kind]?.label || "Материал";
       return <article className="material-result" key={kind}>
         <div className="material-result-row"><strong>{label}</strong><div className="prompt-copy-actions">
           <button type="button" aria-expanded={open === kind} onClick={() => { void store.flush(); setOpen(open === kind ? null : kind); }}>{open === kind ? "Свернуть" : "Открыть"} {label.toLowerCase()}</button>
-          {(["docx", "txt"] as const).map(extension => <button type="button" key={extension} disabled={store.busy}
+          {(["docx", "txt"] as const).map(extension => <button type="button" key={extension} disabled={store.busy || !materialText(store.data, kind).trim()}
             aria-label={`Скачать ${label.toLowerCase()} (${extension === "docx" ? "Word" : "TXT"})`}
             onClick={() => save(`${store.base}/text/${kind}/${extension}`, `${label}.${extension}`)}>↓ {extension === "docx" ? "Word" : "TXT"}</button>)}
         </div></div>

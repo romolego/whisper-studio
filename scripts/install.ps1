@@ -427,20 +427,12 @@ else {
 
 Write-Step "Модели распознавания"
 
-$russianModel = Join-Path $projectRoot "models\turbo-russian\model.bin"
-$englishModel = Join-Path $projectRoot "models\turbo\model.bin"
-if ((Test-Path -LiteralPath $russianModel) -and (Test-Path -LiteralPath $englishModel)) {
+$code = Invoke-External -FilePath $venvPython -Arguments @("-m", "scripts.download_models")
+if ($code -eq 0) {
     Write-Ok "Обе модели на месте"
 }
 else {
-    Write-Host "   ... скачиваются модели, это несколько гигабайт" -ForegroundColor DarkGray
-    $code = Invoke-External -FilePath $venvPython -Arguments @("-m", "scripts.download_models")
-    if ($code -eq 0) {
-        Write-Ok "Модели скачаны"
-    }
-    else {
-        Write-Fail "Не удалось скачать модели распознавания"
-    }
+    Write-Fail "Не удалось скачать модели распознавания"
 }
 
 # --- веб-интерфейс ----------------------------------------------------------
@@ -462,7 +454,10 @@ else {
         Write-Fail "npm не найден рядом с Node.js"
     }
     else {
-        if (Test-Path -LiteralPath (Join-Path $projectRoot "node_modules\vinext")) {
+        $vinextCommand = Join-Path $projectRoot "node_modules\.bin\vinext.cmd"
+        $vinextCli = Join-Path $projectRoot "node_modules\vinext\dist\cli.js"
+        if ((Test-Path -LiteralPath $vinextCommand -PathType Leaf) -and
+            (Test-Path -LiteralPath $vinextCli -PathType Leaf)) {
             Write-Ok "Пакеты интерфейса уже установлены"
         }
         else {
@@ -476,7 +471,7 @@ else {
             }
         }
 
-        if (Test-Path -LiteralPath (Join-Path $projectRoot "dist\client")) {
+        if (Test-FrontendBuild $projectRoot) {
             Write-Ok "Интерфейс уже собран"
         }
         else {

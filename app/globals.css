@@ -2911,6 +2911,12 @@ input {
   font-size: 12px;
 }
 
+@media (max-width: 480px) {
+  .recorder-topline { flex-wrap: wrap; row-gap: 8px; }
+  .recorder-topline > div:first-child { flex-basis: 100%; }
+  .recorder-topline .dictation-options { margin-inline: 0 auto; }
+}
+
 .recorder-state-dot {
   width: 9px;
   height: 9px;

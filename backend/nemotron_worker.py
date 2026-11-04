@@ -32,11 +32,15 @@ import soundfile as sf
 import torch
 from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-from worker_device import pick_device
+if __package__:
+    from .runtime import NEMOTRON_REVISION as MODEL_REVISION
+    from .worker_device import pick_device
+else:
+    from runtime import NEMOTRON_REVISION as MODEL_REVISION
+    from worker_device import pick_device
 
 
 MODEL_ID = "nvidia/Nemotron-3-Diarization"
-MODEL_REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
 # В репозитории модели лежат ещё .nemo для NeMo, GGUF для C++ и демо-ролики —
 # ещё 300 МБ, которые этому worker не нужны.
 MODEL_FILES = ["config.json", "processor_config.json", "model.safetensors"]

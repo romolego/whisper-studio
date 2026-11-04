@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -29,6 +32,7 @@ from . import (
 )
 from .cancellation import CancelledJob
 from .media import extract_audio, trim_bounds
+from .project_locks import project_lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +48,8 @@ MODEL_REVISIONS = {
 }
 
 _model_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+_model_download_lock = threading.Lock()
 
 # Модели держатся загруженными по языкам, а не по одной.
 #
@@ -91,7 +97,6 @@ def prepare_model_files(progress: Callable[[str], None] | None = None) -> None:
         repo_id: str,
         local_dir: Path,
         patterns: list[str],
-        marker: Path,
     ) -> None:
         last_error: Exception | None = None
         for attempt in range(1, 61):
@@ -103,9 +108,10 @@ def prepare_model_files(progress: Callable[[str], None] | None = None) -> None:
                     local_dir=str(local_dir),
                     max_workers=1,
                 )
-                if marker.exists():
+                absent = [name for name in patterns if not (local_dir / name).is_file()]
+                if not absent:
                     return
-                raise RuntimeError(f"Не загружен обязательный файл {marker.name}")
+                raise RuntimeError(f"Не загружен обязательный файл {absent[0]}")
             except Exception as exc:
                 last_error = exc
                 if progress:
@@ -116,38 +122,30 @@ def prepare_model_files(progress: Callable[[str], None] | None = None) -> None:
                 time.sleep(min(8, 1 + attempt // 5))
         raise RuntimeError(f"Не удалось загрузить модель: {last_error}")
 
-    if progress:
-        progress("Загружается английская модель Turbo…")
-    if not (ENGLISH_MODEL_DIR / "model.bin").exists():
-        download_with_resume(
-            ENGLISH_REPO,
-            ENGLISH_MODEL_DIR,
-            [
-                "config.json",
-                "preprocessor_config.json",
-                "model.bin",
-                "tokenizer.json",
-                "vocabulary.*",
-            ],
-            ENGLISH_MODEL_DIR / "model.bin",
-        )
+    with _model_download_lock:
+        missing = runtime.missing_turbo_files(ENGLISH_MODEL_DIR)
+        if missing:
+            if progress:
+                progress("Загружается английская модель Turbo…")
+            download_with_resume(ENGLISH_REPO, ENGLISH_MODEL_DIR, missing)
 
-    if progress:
-        progress("Загружается русская модель Turbo…")
-    if not (RUSSIAN_MODEL_DIR / "model.bin").exists():
+        missing = runtime.missing_turbo_files(RUSSIAN_MODEL_DIR)
+        if not missing:
+            return
+        if progress:
+            progress("Загружается русская модель Turbo…")
         download_root = MODELS_DIR / "_russian_download"
         download_with_resume(
             RUSSIAN_REPO,
             download_root,
-            ["ct2_int8_float16/*"],
-            download_root / "ct2_int8_float16" / "model.bin",
+            [f"ct2_int8_float16/{name}" for name in missing],
         )
         source = download_root / "ct2_int8_float16"
         RUSSIAN_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        for item in source.iterdir():
-            target = RUSSIAN_MODEL_DIR / item.name
-            if not target.exists():
-                item.replace(target)
+        for name in missing:
+            target = RUSSIAN_MODEL_DIR / name
+            if not target.is_file():
+                (source / name).replace(target)
 
 
 # Сколько потоков отдавать CTranslate2 на процессоре.
@@ -227,9 +225,10 @@ def _load_model(language: str) -> tuple[WhisperModel, str]:
         if cached is not None:
             return cached, _model_devices[model_key]
 
-        if not (model_path / "model.bin").exists():
-            if model_key == "large-v3":
+        if model_key == "large-v3":
+            if not (model_path / "model.bin").is_file():
                 raise RuntimeError("Полная модель large-v3 не установлена. Установите её в models/large-v3 перед выбором этого режима.")
+        elif runtime.missing_turbo_files(model_path):
             prepare_model_files()
 
         preferred = runtime.preferred_device()
@@ -307,14 +306,76 @@ def _write_outputs(
     job: dict[str, Any],
     segments: list[dict[str, Any]],
     info: dict[str, Any],
+    *,
+    reset_speaker_aliases: bool = False,
+    started: float | None = None,
 ) -> None:
-    session_path = storage.session_dir(job["session_id"])
-    output_dir = session_path / "outputs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # Файлы результата называются как сама запись и лежат в одной папке. Раньше
-    # у каждого задания была своя подпапка с его идентификатором — в проводнике
-    # это выглядело как десяток папок с шестнадцатеричными именами.
-    stem = storage.job_file_base(job)
+    with project_lock(job["session_id"]):
+        output_dir = storage.session_dir(job["session_id"]) / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = storage.job_file_base(job)
+        staging = Path(tempfile.mkdtemp(prefix=".write-", dir=output_dir))
+        keep_backups = False
+        try:
+            rendered = _render_outputs(job, segments, info, staging, stem, reset_speaker_aliases)
+            targets = {kind: output_dir / path.name for kind, path in rendered.items()}
+            published: dict[Path, Path | None] = {}
+            try:
+                for kind, staged in rendered.items():
+                    target = targets[kind]
+                    backup = None
+                    if target.exists():
+                        backup = staging / f".previous-{kind}"
+                        shutil.copy2(target, backup)
+                    staged.replace(target)
+                    published[target] = backup
+                completion = None
+                if started is not None:
+                    completion = dict(options=job["options"], status="completed", progress=1.0,
+                                      processing_seconds=time.perf_counter() - started,
+                                      finished_at=storage.utc_now(), error=None)
+                    if "device" in info:
+                        completion.update(device=info["device"], detected_language=info["language"],
+                                          duration_seconds=info["duration"])
+                storage.add_outputs(job["id"], targets, reset_speaker_aliases=reset_speaker_aliases,
+                                    completion=completion)
+            except Exception:
+                # Если диск недоступен и при откате, оставить копии для восстановления.
+                keep_backups = True
+                for target, backup in reversed(published.items()):
+                    if backup is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        backup.replace(target)
+                keep_backups = False
+                raise
+        finally:
+            if not keep_backups:
+                shutil.rmtree(staging, ignore_errors=True)
+
+
+def _refresh_completed_project(job: dict[str, Any], *, clear_checkpoint: bool = False) -> None:
+    try:
+        if clear_checkpoint:
+            longform.clear(job)
+        storage.sync_session_dir(job["session_id"])
+        exporter.refresh_project_files(job["session_id"])
+    except Exception:
+        logger.exception("Результат задания %s сохранён, обновление папки проекта не удалось", job["id"])
+
+
+def _remove_temp_audio(path: Path | None) -> None:
+    if path is not None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Не удалось удалить временную дорожку %s", path, exc_info=True)
+
+
+def _render_outputs(
+    job: dict[str, Any], segments: list[dict[str, Any]], info: dict[str, Any],
+    output_dir: Path, stem: str, reset_speaker_aliases: bool,
+) -> dict[str, Path]:
     formatting = job["options"]["formatting"]
     timestamp_mode = job["options"]["timestamps"]
 
@@ -339,7 +400,7 @@ def _write_outputs(
         if any(paragraphs.segment_speaker(item) is not None for item in segments)
         else "off"
     )
-    aliases = storage.list_speaker_aliases(job["session_id"])
+    aliases = {} if reset_speaker_aliases else storage.list_speaker_aliases(job["session_id"])
     txt = exporter.render_segments(
         segments,
         timestamp_mode,
@@ -354,7 +415,6 @@ def _write_outputs(
         txt + "\n",
         encoding="utf-8-sig" if job["options"].get("integration_source") == "telegram" else "utf-8",
     )
-    storage.add_output(job["id"], "txt", txt_path)
 
     md_path = output_dir / f"{stem}.md"
     md_path.write_text(
@@ -371,11 +431,9 @@ def _write_outputs(
         + "\n",
         encoding="utf-8",
     )
-    storage.add_output(job["id"], "md", md_path)
 
     docx_path = output_dir / f"{stem}.docx"
     exporter.write_docx(stem, txt, docx_path)
-    storage.add_output(job["id"], "docx", docx_path)
 
     srt_blocks = []
     for index, item in enumerate(display_segments, start=1):
@@ -385,7 +443,6 @@ def _write_outputs(
         )
     srt_path = output_dir / f"{stem}.srt"
     srt_path.write_text("\n\n".join(srt_blocks) + "\n", encoding="utf-8")
-    storage.add_output(job["id"], "srt", srt_path)
 
     vtt_blocks = ["WEBVTT"]
     for item in display_segments:
@@ -395,7 +452,6 @@ def _write_outputs(
         )
     vtt_path = output_dir / f"{stem}.vtt"
     vtt_path.write_text("\n\n".join(vtt_blocks) + "\n", encoding="utf-8")
-    storage.add_output(job["id"], "vtt", vtt_path)
 
     json_path = output_dir / f"{stem}.json"
     json_path.write_text(
@@ -428,7 +484,8 @@ def _write_outputs(
         ),
         encoding="utf-8",
     )
-    storage.add_output(job["id"], "json", json_path)
+    return {"txt": txt_path, "md": md_path, "docx": docx_path,
+            "srt": srt_path, "vtt": vtt_path, "json": json_path}
 
 
 def _clip_duration(source_path: Path, options: dict[str, Any]) -> float:
@@ -591,7 +648,7 @@ def transcribe_job(job_id: str) -> None:
             prepared_path = (
                 storage.job_audio_path(job)
                 if keep_audio
-                else storage.temporary_dir() / f"{job_id}.wav"
+                else storage.processing_temp_dir() / f"{job_id}.wav"
             )
             extract_audio(
                 source_path,
@@ -698,7 +755,7 @@ def transcribe_job(job_id: str) -> None:
                     continue
                 cancellation.check(job_id)
                 lead = min(longform.WINDOW_OVERLAP, window_start)
-                window_path = storage.temporary_dir() / (
+                window_path = storage.processing_temp_dir() / (
                     f"{job_id}-w{int(window_start)}.wav"
                 )
                 try:
@@ -786,27 +843,8 @@ def transcribe_job(job_id: str) -> None:
         }
         clean_options = _clean_rerun_options(options)
         output_job = {**job, "options": clean_options}
-        _write_outputs(output_job, items, metadata)
-        storage.set_job_options(job_id, clean_options)
-        if options.get("_rerun_mode"):
-            storage.clear_speaker_aliases(job_id)
-        elapsed = time.perf_counter() - started
-        storage.update_job(
-            job_id,
-            device=device,
-            status="completed",
-            progress=1.0,
-            detected_language=detected_language,
-            duration_seconds=clip_duration,
-            processing_seconds=elapsed,
-            finished_at=storage.utc_now(),
-        )
-        # Файл дошёл до конца — продолжать больше нечего.
-        longform.clear(job)
-        # Сначала папка догоняет название проекта (пока файл считался, переезд
-        # был запрещён), и только потом в неё пишутся готовые файлы.
-        storage.sync_session_dir(job["session_id"])
-        exporter.refresh_project_files(job["session_id"])
+        _write_outputs(output_job, items, metadata, reset_speaker_aliases=bool(options.get("_rerun_mode")),
+                       started=started)
     except CancelledJob:
         # Остановка по просьбе пользователя: результат не пишем, но исходник и
         # уже готовые выводы прошлых прогонов не трогаем.
@@ -837,10 +875,12 @@ def transcribe_job(job_id: str) -> None:
                 error=str(exc),
                 finished_at=storage.utc_now(),
             )
+    else:
+        _refresh_completed_project(job, clear_checkpoint=True)
     finally:
         # Сохранённое аудио — часть результата проекта, его удалять нельзя.
-        if not keep_audio and prepared_path and prepared_path.exists():
-            prepared_path.unlink()
+        if not keep_audio:
+            _remove_temp_audio(prepared_path)
 
 
 @remote_client.task_scope
@@ -883,7 +923,7 @@ def diarize_existing_job(job_id: str) -> None:
                 source_path = Path(kept)
             else:
                 prepared_path = (
-                    storage.temporary_dir() / f"{job_id}-speakers.wav"
+                    storage.processing_temp_dir() / f"{job_id}-speakers.wav"
                 )
                 extract_audio(
                     source_path,
@@ -928,19 +968,7 @@ def diarize_existing_job(job_id: str) -> None:
                 (payload.get("removed_hallucinations") or []) + dropped
             ),
         }
-        _write_outputs(output_job, segments, metadata)
-        storage.set_job_options(job_id, clean_options)
-        storage.clear_speaker_aliases(job_id)
-        storage.update_job(
-            job_id,
-            status="completed",
-            progress=1.0,
-            processing_seconds=time.perf_counter() - started,
-            error=None,
-            finished_at=storage.utc_now(),
-        )
-        storage.sync_session_dir(job["session_id"])
-        exporter.refresh_project_files(job["session_id"])
+        _write_outputs(output_job, segments, metadata, reset_speaker_aliases=True, started=started)
     except CancelledJob:
         _restore_previous_result(
             job_id,
@@ -953,6 +981,7 @@ def diarize_existing_job(job_id: str) -> None:
             options,
             f"Не удалось разметить спикеров: {exc}",
         )
+    else:
+        _refresh_completed_project(job)
     finally:
-        if prepared_path and prepared_path.exists():
-            prepared_path.unlink()
+        _remove_temp_audio(prepared_path)

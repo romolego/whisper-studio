@@ -6,6 +6,13 @@ import os
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "data" / "runtime.json"
+TURBO_MODEL_FILES = ("model.bin", "config.json", "preprocessor_config.json", "tokenizer.json", "vocabulary.json")
+NEMOTRON_REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
+
+
+def missing_turbo_files(folder: Path) -> list[str]:
+    """Files needed for a local, offline load of either pinned Turbo checkpoint."""
+    return [name for name in TURBO_MODEL_FILES if not (folder / name).is_file()]
 
 
 def preferred_device() -> str:

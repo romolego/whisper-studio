@@ -2,12 +2,26 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 const source = await readFile(new URL("../app/project-materials-store.ts", import.meta.url), "utf8");
 const { ProjectMaterialsStore, projectMaterialsStore } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source)).toString("base64")}`);
 const panelSource = await readFile(new URL("../app/MaterialPanels.tsx", import.meta.url), "utf8");
 const uploadSource = panelSource.slice(panelSource.indexOf("export async function uploadSchemes("), panelSource.indexOf("export function ImageViewer("));
 const { uploadSchemes } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(uploadSource)).toString("base64")}`);
+
+test("a direct download uses the project filename after its global prompt was renamed", async () => {
+  const source = panelSource.slice(panelSource.indexOf("export async function downloadArtifact("), panelSource.indexOf("export function SaveStatus("));
+  const name = "Прежнее имя [custom_abc].txt";
+  let downloaded;
+  const download = runInNewContext(stripTypeScriptTypes(source.replace("export ", "")) + "\ndownloadArtifact", {
+    fetch: async () => new Response("Текст", { headers: { "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}` } }),
+    saveBlob: (filename, blob) => { downloaded = { filename, blob }; },
+  });
+  await download("/test.txt", "Новое имя.txt");
+  assert.equal(downloaded.filename, name);
+  assert.equal(await downloaded.blob.text(), "Текст");
+});
 const empty = () => ({ revision: 0, summary: "", minutes: "", images: [], updated_at: null });
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };

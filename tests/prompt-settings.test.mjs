@@ -156,6 +156,23 @@ test("legacy catalog drafts migrate to the current tab before the shared copy is
   assert.equal(h.storage.getItem(key), null);
 });
 
+test("reopening retries a confirmed offline edit when the server still has its base revision", async () => {
+  const h = editor();
+  h.storage.setItem(h.state.key, JSON.stringify(edit("Offline change")(value())));
+  h.state.current.current = null;
+  h.state.server.current = null;
+  h.state.setTimeout = callback => { queueMicrotask(callback); return 1; };
+  let saved = value();
+  h.state.fetch = async (_, options) => {
+    if (options?.method === "PUT") saved = { ...JSON.parse(options.body), revision: 1 };
+    return response(saved);
+  };
+  await h.load();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(saved.prompts[0].text, "Offline change");
+  assert.equal(h.storage.getItem(h.state.key), null);
+});
+
 test("a late save from the closed editor cannot erase the reopened editor's draft", async () => {
   const a = editor(), gate = deferred();
   a.update(edit("First save"));

@@ -165,6 +165,10 @@ class MissingModelsTests(unittest.TestCase):
         folder = self.root / "turbo-russian"
         folder.mkdir(parents=True)
         (folder / "model.bin").write_bytes(b"x" * 10)
+        self.assertEqual(sorted(components.missing_models()), ["model_en", "model_ru"])
+        self.assertFalse(components._whisper_component(*components.WHISPER_MODELS[0])["present"])
+        for name in ("config.json", "tokenizer.json", "preprocessor_config.json", "vocabulary.json"):
+            (folder / name).touch()
         self.assertEqual(components.missing_models(), ["model_en"])
 
     def test_component_reports_source_and_path(self) -> None:

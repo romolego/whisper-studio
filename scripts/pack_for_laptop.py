@@ -67,6 +67,7 @@ FILES = (
     "README.md",
     "RESTORE.md",
     "INSTALL.md",
+    "MATERIALS_API.md",
     "REMOTE.md",
     "LAPTOP_SETUP.md",
     "AGENTS.md",

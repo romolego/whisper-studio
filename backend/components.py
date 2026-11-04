@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import diarization, storage
+from . import diarization, runtime, storage
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -159,7 +159,7 @@ def _whisper_component(
     key: str, title: str, folder: Path, repo: str, impact: str
 ) -> dict[str, Any]:
     binary = folder / "model.bin"
-    present = binary.is_file()
+    present = not runtime.missing_turbo_files(folder)
     return _component(
         key,
         title,
@@ -503,7 +503,7 @@ def missing_models() -> list[str]:
     return [
         key
         for key, _title, folder, _repo, _impact in WHISPER_MODELS
-        if not (folder / "model.bin").is_file()
+        if runtime.missing_turbo_files(folder)
     ]
 
 

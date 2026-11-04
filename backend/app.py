@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -28,6 +29,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from . import cancellation
+from .project_locks import project_lock
 from .remote_api import router as remote_router
 from .materials_api import router as materials_router, batch_router as materials_batch_router
 from . import diarization as diarization_service
@@ -374,7 +376,6 @@ def _job_task_kind(job: dict) -> str:
 
 def _queue_job_item(
     job: dict,
-    projects: dict[str, dict],
     *,
     position: int | None,
     priority: bool,
@@ -384,14 +385,13 @@ def _queue_job_item(
         if _job_task_kind(job) == "diarization"
         else "Транскрибация"
     )
-    project = projects.get(job["session_id"])
     return {
         "id": job["id"],
         "kind": "job",
         "operation": operation,
         "title": job["original_name"],
         "project_id": job["session_id"],
-        "project_name": project["name"] if project else "",
+        "project_name": job["project_name"],
         "status": job["status"],
         "position": position,
         "priority": priority,
@@ -420,21 +420,15 @@ def _queue_dictation_item(
 
 
 def queue_overview() -> dict:
-    jobs = storage.list_jobs()
+    jobs, fragments = storage.queue_items()
     jobs_by_id = {item["id"]: item for item in jobs}
-    projects = {item["id"]: item for item in storage.list_sessions()}
-    dictation_fragments = {
-        fragment["id"]: fragment
-        for message in storage.list_dictation_messages()
-        for fragment in message["fragments"]
-    }
+    dictation_fragments = {fragment["id"]: fragment for fragment in fragments}
 
     active: dict | None = None
     for job_state in jobs:
         if job_state["status"] == "processing":
             active = _queue_job_item(
                 job_state,
-                projects,
                 position=None,
                 priority=False,
             )
@@ -466,11 +460,10 @@ def queue_overview() -> dict:
             )
         else:
             job_state = jobs_by_id.get(task_id)
-            if not job_state or job_state["status"] != "queued":
+            if not job_state or job_state["status"] != "queued" or task_kind != _job_task_kind(job_state):
                 continue
             item = _queue_job_item(
                 job_state,
-                projects,
                 position=len(waiting) + 1,
                 priority=priority < 0,
             )
@@ -498,7 +491,8 @@ def _still_queued(task_kind: str, task_id: str) -> bool:
     """
     if task_kind == "dictation":
         return storage.get_dictation_fragment(task_id)["status"] == "queued"
-    return storage.get_job(task_id)["status"] == "queued"
+    job = storage.get_job(task_id)
+    return job["status"] == "queued" and task_kind == _job_task_kind(job)
 
 
 MODEL_CACHE = idle_models.IdleModels(release_models, seconds=60)
@@ -710,7 +704,7 @@ def _finalize_url_download(
 
 
 def _purge_temporary_files() -> int:
-    """Убрать мусор из корня рабочей папки, оставшийся после аварий.
+    """Убрать временные файлы обработки, оставшиеся после аварий.
 
     Штатное завершение задачи чистит за собой (`finally` в transcribe_job), но
     после жёсткого убийства процесса извлечённая дорожка остаётся на диске — на
@@ -720,11 +714,15 @@ def _purge_temporary_files() -> int:
     """
     removed = 0
     try:
-        root = storage.temporary_dir()
+        root = storage.processing_temp_dir()
     except Exception:
         return 0
     for path in root.glob("*"):
-        if not path.is_file():
+        if not re.fullmatch(
+            r"(?:[0-9a-f]{32}(?:-(?:speakers|w\d+))?\.wav"
+            r"|[0-9a-f]{32}-punctuation-(?:in|out)\.json"
+            r"|scheme-[0-9a-f]{32}\.upload)", path.name
+        ) or not path.is_file():
             continue
         try:
             path.unlink()
@@ -1344,54 +1342,46 @@ def staged_media(session_id: str | None = None) -> list[dict]:
 
 
 @app.post("/api/media")
-async def upload_media(
+def upload_media(
     files: list[UploadFile] = File(...),
     session_id: str = Form(...),
 ) -> list[dict]:
+    # Сам HTTP multipart уже принят. Весь перенос в проект выполняется в
+    # рабочем потоке, чтобы переименование не увело копии до регистрации.
+    with project_lock(session_id):
+        return _import_uploaded_files(files, session_id)
+
+
+def _import_uploaded_files(files: list[UploadFile], session_id: str) -> list[dict]:
     try:
         storage.get_session(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Проект не найден") from exc
 
-    created: list[dict] = []
-    for upload in files:
-        media_id = uuid.uuid4().hex
-        safe_name = Path(upload.filename or "media").name
-        suffix = Path(safe_name).suffix
-        folder = storage.session_dir(session_id) / "media"
-        folder.mkdir(parents=True, exist_ok=True)
-        # Копия исходника называется как исходник. Раньше здесь стоял
-        # идентификатор записи, и папка `media` выглядела набором
-        # шестнадцатеричных имён, по которым нельзя было понять, что внутри.
-        destination = storage.unique_child(
-            folder,
-            storage.safe_file_name(Path(safe_name).stem, fallback="Запись"),
-            suffix,
-        )
-        try:
-            with destination.open("wb") as target:
-                while chunk := await upload.read(1024 * 1024):
-                    target.write(chunk)
-            metadata = media.probe_media(destination)
-            created.append(
-                storage.create_media(
-                    media_id,
-                    session_id,
-                    safe_name,
-                    destination,
-                    metadata,
-                )
-            )
-        except RuntimeError as exc:
-            if destination.exists():
-                destination.unlink()
-            raise HTTPException(
-                status_code=400,
-                detail=f"Не удалось открыть «{safe_name}»: {exc}",
-            ) from exc
-        finally:
-            await upload.close()
-    return created
+    prepared = []
+    copies: list[Path] = []
+    folder = storage.session_dir(session_id) / "media"
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        for upload in files:
+            name = Path(upload.filename or "media").name
+            destination = storage.unique_child(folder, storage.safe_file_name(Path(name).stem, fallback="Запись"), Path(name).suffix)
+            try:
+                with destination.open("xb") as target:
+                    copies.append(destination)
+                    shutil.copyfileobj(upload.file, target, length=1024 * 1024)
+                metadata = media.probe_media(destination)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=f"Не удалось открыть «{name}»: {exc}") from exc
+            finally:
+                upload.file.close()
+            prepared.append((name, destination, metadata))
+        return storage.register_media_files(session_id, prepared, "managed")
+    except BaseException:
+        # This request owns these copies; none were published if the transaction failed.
+        for path in copies:
+            path.unlink(missing_ok=True)
+        raise
 
 
 @app.post("/api/local-files/pick")
@@ -1407,7 +1397,7 @@ def pick_local_files(payload: LocalFilesPick) -> list[dict]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(selected, str):
         selected = [selected]
-    created: list[dict] = []
+    prepared = []
     for value in selected:
         source = Path(value)
         if not source.is_file():
@@ -1419,18 +1409,8 @@ def pick_local_files(payload: LocalFilesPick) -> list[dict]:
                 status_code=400,
                 detail=f"Не удалось открыть «{source.name}»: {exc}",
             ) from exc
-        created.append(
-            storage.create_media(
-                uuid.uuid4().hex,
-                payload.session_id,
-                source.name,
-                source,
-                metadata,
-                source_path=source,
-                storage_mode="reference",
-            )
-        )
-    return created
+        prepared.append((source.name, source, metadata))
+    return storage.register_media_files(payload.session_id, prepared, "reference")
 
 
 @app.delete("/api/media/{media_id}")
@@ -2449,12 +2429,12 @@ def requeue_job(job_id: str) -> dict:
     try:
         # Снимаем прошлый запрос на остановку, иначе задача остановилась бы
         # сразу же после повторной постановки.
-        cancellation.release(job_id)
         job_state = storage.requeue_job(job_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Задание не найдено") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    cancellation.release(job_id)
     enqueue_project_job(job_id)
     return _with_queue_positions([job_state])[0]
 
@@ -2474,7 +2454,6 @@ def diarize_completed_job(job_id: str, payload: JobDiarize | None = None) -> dic
             raise RuntimeError(
                 "У готового файла нет сохранённых таймкодов для спикеров"
             )
-        cancellation.release(job_id)
         job_state = storage.prepare_job_rerun(
             job_id,
             {"diarization": True, "diarization_engine": engine},
@@ -2484,6 +2463,7 @@ def diarize_completed_job(job_id: str, payload: JobDiarize | None = None) -> dic
         raise HTTPException(status_code=404, detail="Задание не найдено") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    cancellation.release(job_id)
     enqueue_diarization_job(job_id)
     return _with_queue_positions([job_state])[0]
 
@@ -2493,7 +2473,6 @@ def rerun_completed_job(job_id: str, payload: JobRerun) -> dict:
     """Полностью повторить Whisper с выбранными параметрами."""
     engine = _diarization_engine(payload.diarization, payload.diarization_engine)
     try:
-        cancellation.release(job_id)
         job_state = storage.prepare_job_rerun(
             job_id,
             _with_engine(
@@ -2511,6 +2490,7 @@ def rerun_completed_job(job_id: str, payload: JobRerun) -> dict:
         raise HTTPException(status_code=404, detail="Задание не найдено") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    cancellation.release(job_id)
     enqueue_project_job(job_id)
     return _with_queue_positions([job_state])[0]
 

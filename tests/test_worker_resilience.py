@@ -149,26 +149,28 @@ class WorkerSupervisorTests(unittest.TestCase):
 
 
 class TemporaryPurgeTests(unittest.TestCase):
-    def test_purge_removes_files_but_keeps_caches(self) -> None:
+    def test_purge_only_removes_studio_scratch_in_custom_directory(self) -> None:
         import tempfile
         from pathlib import Path
 
-        root = Path(tempfile.mkdtemp(prefix="whisper-purge-"))
-        (root / "leftover.wav").write_bytes(b"x" * 10)
-        (root / "waveforms").mkdir()
-        (root / "waveforms" / "cached.json").write_text("{}", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            name = "a" * 32 + ".wav"
+            (root / name).write_bytes(b"user recording")
+            (root / "waveforms").mkdir()
+            cache = root / "waveforms" / "cached.json"
+            cache.write_bytes(b"{}")
 
-        with patch.object(
-            backend_app.storage, "temporary_dir", return_value=root
-        ):
-            removed = backend_app._purge_temporary_files()
+            with patch.object(backend_app.storage, "temporary_dir", return_value=root):
+                scratch = backend_app.storage.processing_temp_dir()
+                (scratch / name).write_bytes(b"interrupted extraction")
+                (scratch / "notes.txt").write_bytes(b"user notes")
+                self.assertEqual(backend_app._purge_temporary_files(), 1)
 
-        self.assertEqual(removed, 1)
-        self.assertFalse((root / "leftover.wav").exists())
-        self.assertTrue(
-            (root / "waveforms" / "cached.json").exists(),
-            "кеш огибающих трогать нельзя",
-        )
+            self.assertFalse((scratch / name).exists())
+            self.assertEqual((root / name).read_bytes(), b"user recording")
+            self.assertEqual((scratch / "notes.txt").read_bytes(), b"user notes")
+            self.assertEqual(cache.read_bytes(), b"{}")
 
     def test_purge_survives_a_missing_directory(self) -> None:
         from pathlib import Path
