@@ -34,6 +34,35 @@ function networkState() {
   };
 }
 
+test("rapid placement choices save in order and restore the last confirmed choice on failure", async () => {
+  for (const failSecond of [false, true]) {
+    const first = deferred(), sent = [], notices = [];
+    let stored = "end", visible = "end";
+    const save = action("saveDictationInsertMode", {
+      API: "/api", dictationInsertMode: visible, insertModeWrite: { current: { running: false, target: visible, revision: 0 } },
+      setDictationInsertMode: value => { visible = value; }, setNotice: text => notices.push(text),
+      fetch: async (url, {body}) => {
+        const mode = JSON.parse(body).dictation_insert_mode;
+        sent.push(mode);
+        if (sent.length === 1) await first.promise;
+        else if (failSecond) throw new Error("offline");
+        stored = mode;
+        return new Response(JSON.stringify({dictation_insert_mode: mode}));
+      },
+    });
+    const writing = save("cursor");
+    await save("end");
+    assert.deepEqual(sent, ["cursor"]);
+    assert.equal(visible, "end");
+    first.resolve();
+    await writing;
+    assert.deepEqual(sent, ["cursor", "end"]);
+    assert.equal(stored, failSecond ? "cursor" : "end");
+    assert.equal(visible, stored);
+    assert.equal(notices.length, 1);
+  }
+});
+
 test("confirming a dictation never clears text typed into the next draft during refresh", async () => {
   const gate = deferred(), started = deferred();
   let text = "Confirmed text", dirty = true;
@@ -41,7 +70,7 @@ test("confirming a dictation never clears text typed into the next draft during 
   const state = {
     ...networkState(),
     API: "/api", loadedDictationRef: { current: "old" },
-    fetch: async url => new Response(JSON.stringify(url === "/api/dictations" ? { id: "next" } : { id: "old", text, status: "confirmed" })),
+    fetch: async () => new Response(JSON.stringify({ id: "old", text, status: "confirmed", next_draft: { id: "next", text: "", fragments: [] } })),
     setDictations: update => { messages = update(messages); },
     setActiveDictationId: () => {}, setDictationMergedIds: () => {}, setNotice: () => {},
     setDictationText: value => { text = value; }, setDictationDirty: value => { dirty = value; },
@@ -111,17 +140,17 @@ test("a slow draft save cannot overwrite the text of a later save", async () => 
   assert.equal(persisted, "Latest");
 });
 
-test("confirmation drains pending saves, guards both requests and releases the next editor before clipboard", async () => {
-  const prior = deferred(), patched = deferred(), created = deferred(), copied = deferred();
-  const patchStarted = deferred(), postStarted = deferred(), copyStarted = deferred();
+test("confirmation drains pending saves and releases the next editor before clipboard", async () => {
+  const prior = deferred(), patched = deferred(), copied = deferred();
+  const patchStarted = deferred(), copyStarted = deferred();
   const sent = [];
   let field = "Submitted", readOnly = false;
   const state = {
     ...networkState(), API: "/api", loadedDictationRef: { current: "old" },
     fetch: async (_, options) => {
       sent.push(options.method);
-      if (options.method === "PATCH") { patchStarted.resolve(); return patched.promise; }
-      postStarted.resolve(); return created.promise;
+      assert.equal(options.method, "PATCH");
+      patchStarted.resolve(); return patched.promise;
     },
     setConfirmingDictation: locked => { readOnly = locked; },
     setDictations: () => {}, setActiveDictationId: () => {}, setDictationMergedIds: () => {},
@@ -136,16 +165,17 @@ test("confirmation drains pending saves, guards both requests and releases the n
   assert.deepEqual(sent, []);
   prior.resolve(); await patchStarted.promise;
   assert.equal(await confirm({ id: "old" }, field, true), false);
-  patched.resolve(new Response(JSON.stringify({ id: "old", text: "Submitted", status: "confirmed" }))); await postStarted.promise;
-  assert.equal(readOnly, true);
-  assert.equal(await confirm({ id: "old" }, field, true), false);
-  created.resolve(new Response(JSON.stringify({ id: "next" }))); await copyStarted.promise;
+  patched.resolve(new Response(JSON.stringify({
+    id: "old", text: "Submitted", status: "confirmed",
+    next_draft: { id: "next", text: "Already typed in next draft", fragments: [] },
+  }))); await copyStarted.promise;
   assert.equal(state.loadedDictationRef.current, "next");
   assert.equal(readOnly, false);
+  assert.equal(field, "Already typed in next draft");
   field = "Typed before clipboard permission";
   copied.resolve();
   assert.equal(await saving, true);
-  assert.deepEqual(sent, ["PATCH", "POST"]);
+  assert.deepEqual(sent, ["PATCH"]);
   assert.equal(field, "Typed before clipboard permission");
   assert.match(source, /ref=\{dictationTextareaRef\}[\s\S]{0,150}readOnly=\{confirmingDictation\}/);
 });
@@ -157,15 +187,16 @@ test("confirming cut text keeps the server transcript with the audio and copies 
   const state = {
     ...networkState(), API: "/api", loadedDictationRef: { current: "old" },
     fetch: async (url, options) => {
-      if (options.method === "PATCH") { submitted = JSON.parse(options.body); return new Response(JSON.stringify(confirmed)); }
-      return new Response(JSON.stringify({ id: "next", text: "", fragments: [], status: "draft" }));
+      assert.equal(options.method, "PATCH");
+      submitted = JSON.parse(options.body);
+      return new Response(JSON.stringify({ ...confirmed, next_draft: { id: "next", text: "", fragments: [], status: "draft" } }));
     },
     setDictations: update => { history = update([{ id: "old", text: "", fragments: audio }]); },
     setActiveDictationId: () => {}, setDictationMergedIds: () => {}, setDictationDirty: () => {}, setDictationText: () => {},
     writeClipboardText: async text => { copied = text; }, refresh: async () => {},
   };
   assert.equal(await action("confirmDictationMessage", state)({ id: "old", fragments: audio }, "", true), true);
-  assert.deepEqual(submitted, { text: "", status: "confirmed" });
+  assert.deepEqual(submitted, { text: "", status: "confirmed", draft_only: true, start_next_draft: true });
   assert.equal(history.find(item => item.id === "old").text, confirmed.text);
   assert.deepEqual(history.find(item => item.id === "old").fragments, audio);
   assert.equal(copied, confirmed.text);
@@ -176,6 +207,24 @@ test("an empty dictation without audio is not confirmed", async () => {
   const state = { ...networkState(), fetch: async () => { requests++; }, setNotice: () => {} };
   assert.equal(await action("confirmDictationMessage", state)({ id: "empty", fragments: [] }, " "), false);
   assert.equal(requests, 0);
+});
+
+test("a denied clipboard reports whether the fallback copied the saved transcript", async () => {
+  for (const fallback of [true, false, "throws"]) {
+    let notice, removed = false;
+    const write = action("writeClipboardText", {
+      navigator: { clipboard: { writeText: async () => { throw new Error("denied"); } } },
+      document: {
+        createElement: () => ({ select() {}, remove() { removed = true; } }),
+        body: { appendChild() {} },
+        execCommand: () => { if (fallback === "throws") throw new Error("denied"); return fallback; },
+      },
+      setNotice: value => { notice = value; },
+    });
+    await write("Saved transcript", "Saved and copied", "Saved, copy unavailable");
+    assert.equal(notice, fallback === true ? "Saved and copied" : "Saved, copy unavailable");
+    assert.ok(removed);
+  }
 });
 
 test("history copy uses the visible edit, including unsaved and empty drafts", async () => {

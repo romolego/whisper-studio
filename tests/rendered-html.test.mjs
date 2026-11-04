@@ -293,7 +293,7 @@ test("keeps the dictation editor from fighting the typist", async () => {
 
   // Серверный текст читается один раз — когда открылось другое сообщение.
   assert.match(page, /loadedDictationRef\.current !== currentDictationId/);
-  assert.match(page, /setDictationText\(currentDictationServerText \|\| ""\)/);
+  assert.match(page, /setDictationText\(resumed \?\? saved\)/);
 
   // Со стороны сервиса в поле попадает только расшифровка нового фрагмента и
   // в выбранное место. Отметка идёт по id фрагмента, а не сравнением текстов.

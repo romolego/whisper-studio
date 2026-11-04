@@ -29,3 +29,31 @@ test("cursor mode preserves line breaks, punctuation and UTF-16 selection positi
   assert.equal(result.caret, 7);
   assert.equal(insert("", ["Первый", "Второй"], "cursor", 0).text, "Первый\n\nВторой");
 });
+
+test("a fragment matching the selection still moves the caret for the next fragment", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const editorLayout = [...page.matchAll(/useBrowserLayoutEffect\(\(\) => \{[\s\S]*?\}, \[[^\]]*\]\);/g)]
+    .find(match => match[0].includes("field.setSelectionRange"));
+  assert.ok(editorLayout, "Missing editor layout effect");
+  const effect = ts.transpileModule(editorLayout[0], {}).outputText;
+  let start = 7, end = 10, lastDeps;
+  const field = { setSelectionRange(from, to) { start = from; end = to; } };
+  const context = {
+    dictationText: "Привет мир", dictationMergedIds: new Set(),
+    dictationTextareaRef: { current: field }, dictationInsertionRef: { current: null },
+    useBrowserLayoutEffect(callback, deps) {
+      if (!lastDeps || deps.some((dep, i) => !Object.is(dep, lastDeps[i]))) callback();
+      lastDeps = deps;
+    },
+  };
+  vm.runInNewContext(effect, context);
+  for (const fragment of ["мир", "снова"]) {
+    const result = insert(context.dictationText, [fragment], "cursor", start, end);
+    context.dictationText = result.text;
+    context.dictationInsertionRef.current = { caret: result.caret };
+    context.dictationMergedIds = new Set([...context.dictationMergedIds, fragment]);
+    vm.runInNewContext(effect, context);
+  }
+  assert.equal(context.dictationText, "Привет мир снова");
+  assert.deepEqual([start, end], [16, 16]);
+});

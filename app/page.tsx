@@ -7,6 +7,7 @@ import MaterialsResults from "./MaterialsResults";
 import Hint from "./Hint";
 import { InlineEdits } from "./inline-edits";
 import { insertDictationText } from "./dictation-text";
+import { stashDictation, takeDictation } from "./dictation-reload";
 
 import {
   ChangeEvent,
@@ -1424,6 +1425,8 @@ export default function Home() {
   const [media, setMedia] = useState<StagedMedia[]>([]);
   const [dictations, setDictations] = useState<DictationMessage[]>([]);
   const [settings, setSettings] = useState<Settings>(initialSettings);
+  const [dictationInsertMode, setDictationInsertMode] = useState(initialSettings.dictation_insert_mode);
+  const insertModeWrite = useRef({ target: initialSettings.dictation_insert_mode, running: false, revision: 0 });
   const [activeProjectId, setActiveProjectId] = useState("");
   // Открытый проект может не попасть на текущую страницу ленты — тогда он
   // догружается отдельным запросом, чтобы экран проекта не опустел.
@@ -1710,6 +1713,7 @@ export default function Home() {
   const refresh = useCallback(async function refreshView() {
     if (activeRefresh.current !== refreshView) return;
     const request = ++refreshStarted.current;
+    const insertModeRevision = insertModeWrite.current.revision;
     const obsolete = () => activeRefresh.current !== refreshView || request < refreshApplied.current;
     try {
       const projectQuery = new URLSearchParams({
@@ -1808,6 +1812,9 @@ export default function Home() {
         return next;
       });
       setSettings(nextSettings);
+      if (!insertModeWrite.current.running && insertModeRevision === insertModeWrite.current.revision) {
+        setDictationInsertMode(nextSettings.dictation_insert_mode ?? "end");
+      }
       setDiarizationStatus(nextDiarization);
       setDictations(nextDictations);
       // В заголовке — количество подтверждённых сообщений: черновик приходит
@@ -2115,7 +2122,7 @@ export default function Home() {
     Boolean(activeProject?.completed_count) &&
     projectSpeakers.length === 0;
   const currentDictation =
-    dictations.find((message) => message.id === activeDictationId) ||
+    dictations.find((message) => message.id === activeDictationId && message.status === "draft") ||
     dictations.find((message) => message.status === "draft");
   const currentDictationId = currentDictation?.id;
   const currentDictationServerText = currentDictation?.text;
@@ -2183,6 +2190,18 @@ export default function Home() {
     dictationTextRef.current = dictationText;
   }, [dictationText]);
 
+  useBrowserLayoutEffect(() => {
+    if (!currentDictationId || !dictationDirty || loadedDictationRef.current !== currentDictationId) return;
+    const leaving = (event: PageTransitionEvent) => {
+      if (!event.persisted) stashDictation(
+        currentDictationId, dictationText, currentDictationServerText ?? "",
+        currentDictationTranscripts.filter(item => dictationMergedIds.has(item.id)).map(item => item.id),
+      );
+    };
+    window.addEventListener("pagehide", leaving);
+    return () => window.removeEventListener("pagehide", leaving);
+  }, [currentDictationId, dictationText, dictationDirty, currentDictationServerText, currentDictationTranscripts, dictationMergedIds]);
+
   useEffect(() => {
     if (!currentDictationId) return;
 
@@ -2191,11 +2210,14 @@ export default function Home() {
       // все вошедшие в него расшифровки помечаются вписанными — иначе они
       // добавятся в поле по второму разу.
       loadedDictationRef.current = currentDictationId;
-      setDictationText(currentDictationServerText || "");
+      dictationInsertionRef.current = null;
+      const saved = currentDictationServerText ?? "";
+      const resumed = takeDictation(currentDictationId, saved, currentDictationTranscripts);
+      setDictationText(resumed ?? saved);
       setDictationMergedIds(
         new Set(currentDictationTranscripts.map((item) => item.id)),
       );
-      setDictationDirty(false);
+      setDictationDirty(resumed !== null && resumed !== saved);
       return;
     }
 
@@ -2205,7 +2227,7 @@ export default function Home() {
     if (!pending.length) return;
 
     const field = dictationTextareaRef.current;
-    const mode = field ? settings.dictation_insert_mode : "end";
+    const mode = field ? dictationInsertMode : "end";
     const inserted = insertDictationText(
       dictationTextRef.current, pending.map(item => item.text), mode,
       field?.selectionStart, field?.selectionEnd,
@@ -2214,9 +2236,6 @@ export default function Home() {
       caret: inserted.caret,
       scrollTop: mode === "cursor" ? field?.scrollTop : undefined,
     };
-    // Пришедшая расшифровка — это и есть внешнее событие, ради которого поле
-    // вообще связано с сервисом: другого способа дописать её в конец, не трогая
-    // набранное руками, нет.
     setDictationText(inserted.text);
     setDictationMergedIds((current) => {
       const next = new Set(current);
@@ -2229,9 +2248,10 @@ export default function Home() {
     currentDictationServerText,
     currentDictationTranscripts,
     dictationMergedIds,
-    settings.dictation_insert_mode,
+    dictationInsertMode,
   ]);
 
+  // Совпадающий с выделением фрагмент не меняет строку, но снимает выделение.
   useBrowserLayoutEffect(() => {
     const insertion = dictationInsertionRef.current;
     if (!insertion) return;
@@ -2240,7 +2260,7 @@ export default function Home() {
     if (!field) return;
     field.setSelectionRange(insertion.caret, insertion.caret);
     field.scrollTop = insertion.scrollTop ?? field.scrollHeight;
-  }, [dictationText]);
+  }, [dictationText, dictationMergedIds]);
 
   useEffect(() => {
     if (!dictationDirty || !currentDictationId || currentDictationBusy || confirmingDictation) return;
@@ -2639,7 +2659,7 @@ export default function Home() {
     const request = Promise.allSettled(dictationSavesRef.current).then(() => fetch(`${API}/dictations/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, draft_only: true }),
     }));
     dictationSavesRef.current.add(request);
     try {
@@ -2667,19 +2687,26 @@ export default function Home() {
   async function writeClipboardText(
     value: string,
     successMessage = "Текст диктовки скопирован",
+    failureMessage = "Не удалось скопировать текст",
   ) {
+    let copied = false;
     try {
       await navigator.clipboard.writeText(value);
-      setNotice(successMessage);
+      copied = true;
     } catch {
       const area = document.createElement("textarea");
-      area.value = value;
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand("copy");
-      area.remove();
-      setNotice(successMessage);
+      try {
+        area.value = value;
+        document.body.appendChild(area);
+        area.select();
+        copied = document.execCommand("copy");
+      } catch {
+        // Браузер может запретить и резервный способ копирования.
+      } finally {
+        area.remove();
+      }
     }
+    setNotice(copied ? successMessage : failureMessage);
   }
 
   async function copyDictationText(value = dictationText, saveCurrent = true) {
@@ -2703,20 +2730,16 @@ export default function Home() {
     setAutoConfirmDictationId(id => id === message.id ? "" : id);
     try {
       await Promise.allSettled(dictationSavesRef.current);
+      const startNext = loadedDictationRef.current === message.id;
       const response = await fetch(`${API}/dictations/${message.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, status: "confirmed" }),
+        body: JSON.stringify({ text, status: "confirmed", draft_only: true, start_next_draft: startNext }),
       });
       if (!response.ok) throw new Error(await errorMessage(response));
-      const confirmed = (await response.json()) as DictationMessage;
+      const { next_draft: next, ...confirmed } = (await response.json()) as
+        DictationMessage & { next_draft?: DictationMessage | null };
       clean = confirmed.text.trim();
-      let next: DictationMessage | null = null;
-      if (loadedDictationRef.current === message.id) {
-        const nextResponse = await fetch(`${API}/dictations`, { method: "POST" });
-        if (!nextResponse.ok) throw new Error(await errorMessage(nextResponse));
-        next = (await nextResponse.json()) as DictationMessage;
-      }
       // Более ранний опрос мог ещё не увидеть новый черновик.
       refreshApplied.current = ++refreshStarted.current;
       setDictations(current => {
@@ -2724,11 +2747,11 @@ export default function Home() {
           ? confirmed : item);
         return next ? [next, ...updated.filter(item => item.id !== next.id)] : updated;
       });
-      if (next && loadedDictationRef.current === message.id) {
-        setActiveDictationId(next.id);
-        loadedDictationRef.current = next.id;
-        setDictationMergedIds(new Set());
-        setDictationText("");
+      if (startNext && loadedDictationRef.current === message.id) {
+        setActiveDictationId(next?.id ?? "");
+        loadedDictationRef.current = next?.id ?? "";
+        setDictationMergedIds(new Set(next?.fragments.filter(item => item.status === "completed").map(item => item.id)));
+        setDictationText(next?.text ?? "");
         setDictationDirty(false);
       }
     } catch (reason) {
@@ -2742,6 +2765,7 @@ export default function Home() {
       await writeClipboardText(
         clean,
         "Сообщение сохранено в истории и скопировано",
+        "Сообщение сохранено в истории. Не удалось скопировать текст",
       );
     } else {
       setNotice("Сообщение сохранено в истории");
@@ -3510,6 +3534,40 @@ export default function Home() {
       setDictationPageSizeChoice("");
       setDictationPage(1);
     }
+  }
+
+  async function saveDictationInsertMode(value: Settings["dictation_insert_mode"]) {
+    const write = insertModeWrite.current;
+    setDictationInsertMode(value);
+    write.target = value;
+    if (write.running) return;
+    write.running = true;
+    let confirmed = dictationInsertMode;
+    let notice: string;
+    let submitted: typeof value;
+    do {
+      submitted = write.target;
+      try {
+        const response = await fetch(`${API}/settings`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dictation_insert_mode: submitted }),
+        });
+        if (response.ok) {
+          confirmed = ((await response.json()) as Settings).dictation_insert_mode;
+          notice = "Настройка сохранена";
+        } else {
+          notice = await errorMessage(response);
+        }
+      } catch {
+        notice = "Не удалось сохранить настройку";
+      }
+    } while (write.target !== submitted);
+    // Ответы опросов, начатых до завершения этой записи, могут быть устаревшими.
+    write.revision++;
+    write.running = false;
+    setDictationInsertMode(confirmed);
+    setNotice(notice);
   }
 
   async function saveSetting<K extends keyof Settings>(
@@ -7735,8 +7793,9 @@ export default function Home() {
                   <div className="choice" role="group" aria-label="Вставка распознанного текста">
                     {(["end", "cursor"] as const).map(value => (
                       <button type="button" key={value}
-                        className={settings.dictation_insert_mode === value ? "active" : ""}
-                        onClick={() => saveSetting("dictation_insert_mode", value)}>
+                        className={dictationInsertMode === value ? "active" : ""}
+                        aria-pressed={dictationInsertMode === value}
+                        onClick={() => saveDictationInsertMode(value)}>
                         {value === "end" ? "В конец" : "К курсору"}
                       </button>
                     ))}

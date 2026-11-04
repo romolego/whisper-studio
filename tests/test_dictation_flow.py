@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 
@@ -145,6 +146,43 @@ class DictationContinuationTests(unittest.TestCase):
         result = storage.update_dictation_message(message["id"], status="confirmed")
         self.assertEqual("Осталось.", result["text"])
         self.assertEqual(["keep"], [item["id"] for item in result["fragments"]])
+
+    def test_failed_successor_insert_rolls_back_confirmation_and_retry_restores_cut_text(self) -> None:
+        mid = storage.create_dictation_message()["id"]
+        path = storage.dictation_message_dir(mid) / "audio.wav"
+        path.write_bytes(b"fixture audio")
+        storage.create_dictation_fragment("audio", mid, path, "audio/wav", 1, "ru", "fast")
+        storage.complete_dictation_fragment("audio", "Сохранённая речь.", "ru", 1)
+        storage.update_dictation_message(mid, text="", draft_only=True)
+        with storage.connect() as db:
+            db.execute("""CREATE TRIGGER fail_insert BEFORE INSERT ON dictation_messages
+                          BEGIN SELECT RAISE(ABORT, 'injected failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            storage.update_dictation_message(mid, text="", status="confirmed", start_next_draft=True)
+        before_retry = storage.get_dictation_message(mid)
+        self.assertEqual((before_retry["status"], before_retry["text"]), ("draft", ""))
+        with storage.connect() as db:
+            db.execute("DROP TRIGGER fail_insert")
+        result = storage.update_dictation_message(mid, text="", status="confirmed", start_next_draft=True)
+        self.assertEqual(result["text"], "Сохранённая речь.")
+        self.assertEqual(result["next_draft"]["status"], "draft")
+        self.assertEqual(path.read_bytes(), b"fixture audio")
+
+    def test_lost_ack_retry_preserves_history_edits_and_reuses_its_own_next_draft(self) -> None:
+        mid = storage.create_dictation_message()["id"]
+        result = storage.update_dictation_message(mid, text="Первое.", status="confirmed", start_next_draft=True)
+        successor_id = result["next_draft"]["id"]
+        storage.update_dictation_message(successor_id, text="Следующая запись.", draft_only=True)
+        storage.create_dictation_message()  # Чужой черновик из другой вкладки.
+        storage.update_dictation_message(mid, text="Исправлено в истории.")
+        with self.assertRaises(storage.DictationAlreadyConfirmed):
+            storage.update_dictation_message(mid, text="", draft_only=True)
+        retry = storage.update_dictation_message(mid, text="Первое.", status="confirmed", start_next_draft=True)
+        self.assertEqual(retry["text"], "Исправлено в истории.")
+        self.assertEqual(retry["confirmed_at"], result["confirmed_at"])
+        self.assertEqual(retry["next_draft"]["id"], successor_id)
+        self.assertEqual(retry["next_draft"]["text"], "Следующая запись.")
+        self.assertEqual(storage.count_dictation_messages(), 3)
 
 
 if __name__ == "__main__":

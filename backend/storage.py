@@ -1936,20 +1936,23 @@ def set_dictation_project(message_id: str, project_id: str | None) -> None:
             raise KeyError(message_id)
 
 
-def create_dictation_message() -> dict[str, Any]:
-    message_id = uuid.uuid4().hex
+def _insert_dictation_draft(db: sqlite3.Connection, message_id: str) -> dict[str, Any]:
     stamp = utc_now()
-    with connect() as db:
-        db.execute(
-            """
-            INSERT INTO dictation_messages(
-                id, text, status, created_at, updated_at
-            ) VALUES (?, '', 'draft', ?, ?)
-            """,
-            (message_id, stamp, stamp),
-        )
+    db.execute(
+        """
+        INSERT INTO dictation_messages(id, text, status, created_at, updated_at)
+        VALUES (?, '', 'draft', ?, ?)
+        """,
+        (message_id, stamp, stamp),
+    )
     dictation_message_dir(message_id).mkdir(parents=True, exist_ok=True)
-    return get_dictation_message(message_id)
+    row = db.execute("SELECT * FROM dictation_messages WHERE id = ?", (message_id,)).fetchone()
+    return _dictation_message_from_row(db, row)
+
+
+def create_dictation_message() -> dict[str, Any]:
+    with connect() as db:
+        return _insert_dictation_draft(db, uuid.uuid4().hex)
 
 
 def get_dictation_message(message_id: str) -> dict[str, Any]:
@@ -2003,22 +2006,47 @@ def list_dictation_messages(
         return [_dictation_message_from_row(db, row) for row in rows]
 
 
+class DictationAlreadyConfirmed(ValueError):
+    pass
+
+
+def _successor_draft(db: sqlite3.Connection, message_id: str) -> dict[str, Any] | None:
+    # Один и тот же переход после потери ответа открывает тот же черновик.
+    next_id = uuid.uuid5(uuid.NAMESPACE_URL, f"whisper-studio/dictations/{message_id}/next").hex
+    row = db.execute("SELECT * FROM dictation_messages WHERE id = ?", (next_id,)).fetchone()
+    if row is None:
+        return _insert_dictation_draft(db, next_id)
+    if row["status"] == "draft":
+        return _dictation_message_from_row(db, row)
+    return None
+
+
 def update_dictation_message(
     message_id: str,
     *,
     text: str | None = None,
     status: str | None = None,
+    draft_only: bool = False,
+    start_next_draft: bool = False,
 ) -> dict[str, Any]:
     if status is not None and status not in {"draft", "confirmed"}:
         raise ValueError("Некорректный статус диктовки")
+    if start_next_draft and status != "confirmed":
+        raise ValueError("Для открытия следующего черновика подтвердите диктовку")
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM dictation_messages WHERE id = ?", (message_id,)).fetchone()
+        if row is None:
+            raise KeyError(message_id)
+        if row["status"] == "confirmed" and (draft_only or start_next_draft):
+            if status != "confirmed":
+                raise DictationAlreadyConfirmed("Диктовка уже сохранена в истории")
+            # Подтверждение уже было принято. Правки из истории остаются действующими.
+            result = _dictation_message_from_row(db, row)
+            if start_next_draft:
+                result["next_draft"] = _successor_draft(db, message_id)
+            return result
         if status == "confirmed":
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT text FROM dictation_messages WHERE id = ?", (message_id,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(message_id)
             submitted = row["text"] if text is None else text
             if not submitted.strip():
                 # Вырезанный текст не удаляет сохранённые записи. В историю
@@ -2045,7 +2073,7 @@ def update_dictation_message(
         assignments.append("updated_at = ?")
         values.append(utc_now())
         values.append(message_id)
-        result = db.execute(
+        db.execute(
             f"""
             UPDATE dictation_messages
             SET {", ".join(assignments)}
@@ -2053,9 +2081,11 @@ def update_dictation_message(
             """,
             values,
         )
-        if result.rowcount == 0:
-            raise KeyError(message_id)
-    return get_dictation_message(message_id)
+        row = db.execute("SELECT * FROM dictation_messages WHERE id = ?", (message_id,)).fetchone()
+        result = _dictation_message_from_row(db, row)
+        if start_next_draft:
+            result["next_draft"] = _successor_draft(db, message_id)
+        return result
 
 
 def delete_dictation_message(message_id: str) -> None:

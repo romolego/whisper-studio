@@ -300,6 +300,8 @@ class DictationToProject(BaseModel):
 class DictationMessagePatch(BaseModel):
     text: str | None = Field(default=None, max_length=2_000_000)
     status: Literal["draft", "confirmed"] | None = None
+    draft_only: bool = False
+    start_next_draft: bool = False
 
 
 def _diarization_engine(enabled: bool, requested: str | None) -> str | None:
@@ -1774,12 +1776,16 @@ def edit_dictation_message(
             message_id,
             text=payload.text,
             status=payload.status,
+            draft_only=payload.draft_only,
+            start_next_draft=payload.start_next_draft,
         )
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
             detail="Диктовка не найдена",
         ) from exc
+    except storage.DictationAlreadyConfirmed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
