@@ -41,7 +41,7 @@ test("confirming a dictation never clears text typed into the next draft during 
   const state = {
     ...networkState(),
     API: "/api", loadedDictationRef: { current: "old" },
-    fetch: async url => new Response(JSON.stringify(url === "/api/dictations" ? { id: "next" } : {})),
+    fetch: async url => new Response(JSON.stringify(url === "/api/dictations" ? { id: "next" } : { id: "old", text, status: "confirmed" })),
     setDictations: update => { messages = update(messages); },
     setActiveDictationId: () => {}, setDictationMergedIds: () => {}, setNotice: () => {},
     setDictationText: value => { text = value; }, setDictationDirty: value => { dirty = value; },
@@ -136,7 +136,7 @@ test("confirmation drains pending saves, guards both requests and releases the n
   assert.deepEqual(sent, []);
   prior.resolve(); await patchStarted.promise;
   assert.equal(await confirm({ id: "old" }, field, true), false);
-  patched.resolve(new Response("{}")); await postStarted.promise;
+  patched.resolve(new Response(JSON.stringify({ id: "old", text: "Submitted", status: "confirmed" }))); await postStarted.promise;
   assert.equal(readOnly, true);
   assert.equal(await confirm({ id: "old" }, field, true), false);
   created.resolve(new Response(JSON.stringify({ id: "next" }))); await copyStarted.promise;
@@ -148,6 +148,34 @@ test("confirmation drains pending saves, guards both requests and releases the n
   assert.deepEqual(sent, ["PATCH", "POST"]);
   assert.equal(field, "Typed before clipboard permission");
   assert.match(source, /ref=\{dictationTextareaRef\}[\s\S]{0,150}readOnly=\{confirmingDictation\}/);
+});
+
+test("confirming cut text keeps the server transcript with the audio and copies it", async () => {
+  const audio = [{ id: "audio" }];
+  const confirmed = { id: "old", text: "Saved audio transcript", fragments: audio, status: "confirmed" };
+  let copied, history, submitted;
+  const state = {
+    ...networkState(), API: "/api", loadedDictationRef: { current: "old" },
+    fetch: async (url, options) => {
+      if (options.method === "PATCH") { submitted = JSON.parse(options.body); return new Response(JSON.stringify(confirmed)); }
+      return new Response(JSON.stringify({ id: "next", text: "", fragments: [], status: "draft" }));
+    },
+    setDictations: update => { history = update([{ id: "old", text: "", fragments: audio }]); },
+    setActiveDictationId: () => {}, setDictationMergedIds: () => {}, setDictationDirty: () => {}, setDictationText: () => {},
+    writeClipboardText: async text => { copied = text; }, refresh: async () => {},
+  };
+  assert.equal(await action("confirmDictationMessage", state)({ id: "old", fragments: audio }, "", true), true);
+  assert.deepEqual(submitted, { text: "", status: "confirmed" });
+  assert.equal(history.find(item => item.id === "old").text, confirmed.text);
+  assert.deepEqual(history.find(item => item.id === "old").fragments, audio);
+  assert.equal(copied, confirmed.text);
+});
+
+test("an empty dictation without audio is not confirmed", async () => {
+  let requests = 0;
+  const state = { ...networkState(), fetch: async () => { requests++; }, setNotice: () => {} };
+  assert.equal(await action("confirmDictationMessage", state)({ id: "empty", fragments: [] }, " "), false);
+  assert.equal(requests, 0);
 });
 
 test("history copy uses the visible edit, including unsaved and empty drafts", async () => {

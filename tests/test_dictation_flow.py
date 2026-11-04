@@ -98,6 +98,54 @@ class DictationContinuationTests(unittest.TestCase):
         self.assertEqual(2, len(confirmed["fragments"]))
         self.assertEqual(combined["text"], confirmed["text"])
 
+    def test_cut_text_is_restored_only_on_confirmation_and_audio_is_unchanged(self) -> None:
+        message = storage.create_dictation_message()
+        paths = []
+        for index, transcript in enumerate(["Первый фрагмент.", "Второй фрагмент."]):
+            path = storage.dictation_message_dir(message["id"]) / f"{index}.wav"
+            path.write_bytes(b"saved audio")
+            paths.append(path)
+            fragment = storage.create_dictation_fragment(
+                f"audio-{index}", message["id"], path, "audio/wav", 1, "ru", "fast"
+            )
+            storage.complete_dictation_fragment(fragment["id"], transcript, "ru", 1)
+        cut = storage.update_dictation_message(message["id"], text="")
+        self.assertEqual("", cut["text"])
+        confirmed = storage.update_dictation_message(message["id"], text="", status="confirmed")
+        self.assertEqual("Первый фрагмент.\n\nВторой фрагмент.", confirmed["text"])
+        self.assertEqual(2, len(confirmed["fragments"]))
+        self.assertEqual([b"saved audio"] * 2, [path.read_bytes() for path in paths])
+        self.assertEqual(confirmed, storage.get_dictation_message(message["id"]))
+
+    def test_confirmation_preserves_manual_text_instead_of_source_transcript(self) -> None:
+        message = storage.create_dictation_message()
+        path = storage.dictation_message_dir(message["id"]) / "audio.wav"
+        fragment = storage.create_dictation_fragment("audio", message["id"], path, "audio/wav", 1, "ru", "fast")
+        storage.complete_dictation_fragment(fragment["id"], "Исходная речь.", "ru", 1)
+        result = storage.update_dictation_message(message["id"], text="Моя правка", status="confirmed")
+        self.assertEqual("Моя правка", result["text"])
+
+    def test_insertion_preference_is_persistent_validated_and_defaults_to_end(self) -> None:
+        self.assertEqual("end", storage.get_settings()["dictation_insert_mode"])
+        storage.update_settings({"dictation_insert_mode": "cursor"})
+        storage.init_db()
+        self.assertEqual("cursor", storage.get_settings()["dictation_insert_mode"])
+        with self.assertRaises(ValueError):
+            storage.update_settings({"dictation_insert_mode": "anywhere"})
+
+    def test_confirmation_does_not_restore_a_deleted_fragment(self) -> None:
+        message = storage.create_dictation_message()
+        for fid, transcript in [("keep", "Осталось."), ("remove", "Удалено.")]:
+            path = storage.dictation_message_dir(message["id"]) / f"{fid}.wav"
+            path.write_bytes(b"audio")
+            storage.create_dictation_fragment(fid, message["id"], path, "audio/wav", 1, "ru", "fast")
+            storage.complete_dictation_fragment(fid, transcript, "ru", 1)
+        storage.delete_dictation_fragment("remove")
+        storage.update_dictation_message(message["id"], text=" ")
+        result = storage.update_dictation_message(message["id"], status="confirmed")
+        self.assertEqual("Осталось.", result["text"])
+        self.assertEqual(["keep"], [item["id"] for item in result["fragments"]])
+
 
 if __name__ == "__main__":
     unittest.main()

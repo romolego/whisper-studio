@@ -296,13 +296,13 @@ test("keeps the dictation editor from fighting the typist", async () => {
   assert.match(page, /setDictationText\(currentDictationServerText \|\| ""\)/);
 
   // Со стороны сервиса в поле попадает только расшифровка нового фрагмента и
-  // только в конец. Отметка идёт по id фрагмента, а не сравнением текстов.
+  // в выбранное место. Отметка идёт по id фрагмента, а не сравнением текстов.
   assert.match(page, /dictationMergedIds/);
   assert.match(page, /!dictationMergedIds\.has\(item\.id\)/);
-  assert.match(page, /\$\{text\.trimEnd\(\)\}\\n\\n\$\{item\.text\}/);
+  assert.match(page, /insertDictationText\(/);
 
-  // После нового фрагмента курсор и прокрутка переходят в конец.
-  assert.match(page, /field\.setSelectionRange\(field\.value\.length, field\.value\.length\)/);
+  // После нового фрагмента курсор следует за вставленным текстом.
+  assert.match(page, /field\.setSelectionRange\(insertion\.caret, insertion\.caret\)/);
 
   // Поле не блокируется на время распознавания.
   const editor = page.slice(page.indexOf('className="dictation-textarea"'));

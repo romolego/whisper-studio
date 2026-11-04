@@ -6,6 +6,7 @@ import PromptSettings from "./PromptSettings";
 import MaterialsResults from "./MaterialsResults";
 import Hint from "./Hint";
 import { InlineEdits } from "./inline-edits";
+import { insertDictationText } from "./dictation-text";
 
 import {
   ChangeEvent,
@@ -63,6 +64,7 @@ type Settings = {
   default_diarization: "off" | "on";
   dictation_default_language: "ru" | "en" | "auto";
   dictation_default_quality: "fast" | "accurate";
+  dictation_insert_mode: "end" | "cursor";
   project_name_format:
     | "date_title"
     | "date_compact"
@@ -478,6 +480,7 @@ const initialSettings: Settings = {
   default_diarization: "off",
   dictation_default_language: "ru",
   dictation_default_quality: "fast",
+  dictation_insert_mode: "end",
   project_name_format: "date_title",
   project_view: "folders",
   default_import_mode: "copy",
@@ -2165,11 +2168,11 @@ export default function Home() {
    *
    * Теперь связь односторонняя. В поле попадает ровно два вида текста: то, что
    * человек набрал руками, и расшифровка очередного фрагмента — дописанная в
-   * самый конец. Серверный текст читается один раз, когда открывается другое
+   * выбранное в настройках место. Серверный текст читается один раз, когда открывается другое
    * сообщение диктовки. Обратно текст уходит отложенным PATCH-ем, и его ответ
    * на поле уже никак не влияет. */
   const dictationTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const dictationAppendRef = useRef(false);
+  const dictationInsertionRef = useRef<{ caret: number; scrollTop?: number } | null>(null);
   const loadedDictationRef = useRef("");
   // Текст поля для асинхронных ответов: пока PATCH был в пути, человек мог
   // набрать ещё. Тогда снимать отметку «есть несохранённое» нельзя — иначе
@@ -2201,18 +2204,20 @@ export default function Home() {
     );
     if (!pending.length) return;
 
-    // Новый фрагмент всегда дописывается вниз; после обновления покажем конец.
-    dictationAppendRef.current = true;
+    const field = dictationTextareaRef.current;
+    const mode = field ? settings.dictation_insert_mode : "end";
+    const inserted = insertDictationText(
+      dictationTextRef.current, pending.map(item => item.text), mode,
+      field?.selectionStart, field?.selectionEnd,
+    );
+    dictationInsertionRef.current = {
+      caret: inserted.caret,
+      scrollTop: mode === "cursor" ? field?.scrollTop : undefined,
+    };
     // Пришедшая расшифровка — это и есть внешнее событие, ради которого поле
     // вообще связано с сервисом: другого способа дописать её в конец, не трогая
     // набранное руками, нет.
-    setDictationText((current) =>
-      pending.reduce(
-        (text, item) =>
-          text.trim() ? `${text.trimEnd()}\n\n${item.text}` : item.text,
-        current,
-      ),
-    );
+    setDictationText(inserted.text);
     setDictationMergedIds((current) => {
       const next = new Set(current);
       pending.forEach((item) => next.add(item.id));
@@ -2224,15 +2229,17 @@ export default function Home() {
     currentDictationServerText,
     currentDictationTranscripts,
     dictationMergedIds,
+    settings.dictation_insert_mode,
   ]);
 
   useBrowserLayoutEffect(() => {
-    if (!dictationAppendRef.current) return;
-    dictationAppendRef.current = false;
+    const insertion = dictationInsertionRef.current;
+    if (!insertion) return;
+    dictationInsertionRef.current = null;
     const field = dictationTextareaRef.current;
     if (!field) return;
-    if (document.activeElement === field) field.setSelectionRange(field.value.length, field.value.length);
-    field.scrollTop = field.scrollHeight;
+    field.setSelectionRange(insertion.caret, insertion.caret);
+    field.scrollTop = insertion.scrollTop ?? field.scrollHeight;
   }, [dictationText]);
 
   useEffect(() => {
@@ -2685,9 +2692,9 @@ export default function Home() {
     text: string,
     copyAfterConfirm = false,
   ) {
-    const clean = text.trim();
+    let clean = text.trim();
     if (confirmInFlightRef.current) return false;
-    if (!clean) {
+    if (!clean && !message.fragments.length) {
       setNotice("Сначала надиктуйте или введите текст");
       return false;
     }
@@ -2702,6 +2709,8 @@ export default function Home() {
         body: JSON.stringify({ text, status: "confirmed" }),
       });
       if (!response.ok) throw new Error(await errorMessage(response));
+      const confirmed = (await response.json()) as DictationMessage;
+      clean = confirmed.text.trim();
       let next: DictationMessage | null = null;
       if (loadedDictationRef.current === message.id) {
         const nextResponse = await fetch(`${API}/dictations`, { method: "POST" });
@@ -2712,7 +2721,7 @@ export default function Home() {
       refreshApplied.current = ++refreshStarted.current;
       setDictations(current => {
         const updated = current.map(item => item.id === message.id
-          ? { ...item, text, status: "confirmed" as const } : item);
+          ? confirmed : item);
         return next ? [next, ...updated.filter(item => item.id !== next.id)] : updated;
       });
       if (next && loadedDictationRef.current === message.id) {
@@ -2729,7 +2738,7 @@ export default function Home() {
       confirmInFlightRef.current = false;
       setConfirmingDictation(false);
     }
-    if (copyAfterConfirm) {
+    if (copyAfterConfirm && clean) {
       await writeClipboardText(
         clean,
         "Сообщение сохранено в истории и скопировано",
@@ -2786,7 +2795,7 @@ export default function Home() {
       );
     if (awaitingTranscript) return;
     const text = current ? dictationText : message.text;
-    if (!text.trim()) return;
+    if (!text.trim() && !message.fragments.length) return;
 
     let active = true;
     queueMicrotask(async () => {
@@ -6256,9 +6265,9 @@ export default function Home() {
                   ref={dictationTextareaRef}
                   value={dictationText}
                   readOnly={confirmingDictation}
-                  // Поле не блокируется на время распознавания: расшифровка
-                  // дописывается в конец и набранному не мешает.
+                  // Место вставки готовой расшифровки выбирается в настройках.
                   onChange={(event) => {
+                    dictationTextRef.current = event.target.value;
                     setDictationText(event.target.value);
                     setDictationDirty(true);
                   }}
@@ -6389,7 +6398,7 @@ export default function Home() {
                       startingRecording ||
                       confirmingDictation ||
                       currentDictationBusy ||
-                      !dictationText.trim()
+                      (!dictationText.trim() && !currentDictation?.fragments.length)
                     }
                   >
                     OK · В историю
@@ -7713,6 +7722,22 @@ export default function Home() {
                         }
                       >
                         {value === "fast" ? "Быстро" : "Точно"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="setting-row stacked">
+                  <div>
+                    <strong>
+                      Вставка распознанного текста <Hint text="В конец — каждый новый фрагмент дописывается после текста. К курсору — вставляется в выбранное место или заменяет выделение." />
+                    </strong>
+                  </div>
+                  <div className="choice" role="group" aria-label="Вставка распознанного текста">
+                    {(["end", "cursor"] as const).map(value => (
+                      <button type="button" key={value}
+                        className={settings.dictation_insert_mode === value ? "active" : ""}
+                        onClick={() => saveSetting("dictation_insert_mode", value)}>
+                        {value === "end" ? "В конец" : "К курсору"}
                       </button>
                     ))}
                   </div>

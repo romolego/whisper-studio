@@ -147,6 +147,7 @@ class SettingsPatch(BaseModel):
     default_diarization: Literal["off", "on"] | None = None
     dictation_default_language: Literal["auto", "ru", "en"] | None = None
     dictation_default_quality: Literal["fast", "accurate"] | None = None
+    dictation_insert_mode: Literal["end", "cursor"] | None = None
     project_name_format: Literal[
         "date_title",
         "date_compact",

@@ -39,6 +39,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "default_diarization": "off",
     "dictation_default_language": "ru",
     "dictation_default_quality": "fast",
+    "dictation_insert_mode": "end",
     "project_name_format": "date_title",
     "project_view": "folders",
     "default_import_mode": "copy",
@@ -98,6 +99,7 @@ SETTING_VALUES: dict[str, set[str]] = {
     "default_diarization": {"off", "on"},
     "dictation_default_language": {"ru", "en", "auto"},
     "dictation_default_quality": {"fast", "accurate"},
+    "dictation_insert_mode": {"end", "cursor"},
     "project_name_format": {
         "date_title",
         "date_compact",
@@ -2009,20 +2011,40 @@ def update_dictation_message(
 ) -> dict[str, Any]:
     if status is not None and status not in {"draft", "confirmed"}:
         raise ValueError("Некорректный статус диктовки")
-    assignments: list[str] = []
-    values: list[Any] = []
-    if text is not None:
-        assignments.append("text = ?")
-        values.append(text)
-    if status is not None:
-        assignments.append("status = ?")
-        values.append(status)
-        assignments.append("confirmed_at = ?")
-        values.append(utc_now() if status == "confirmed" else None)
-    assignments.append("updated_at = ?")
-    values.append(utc_now())
-    values.append(message_id)
     with connect() as db:
+        if status == "confirmed":
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT text FROM dictation_messages WHERE id = ?", (message_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            submitted = row["text"] if text is None else text
+            if not submitted.strip():
+                # Вырезанный текст не удаляет сохранённые записи. В историю
+                # вместе с ними идёт расшифровка оставшихся готовых фрагментов.
+                text = "\n\n".join(
+                    item["transcript"].strip()
+                    for item in db.execute(
+                        "SELECT transcript FROM dictation_fragments "
+                        "WHERE message_id = ? AND status = 'completed' ORDER BY position",
+                        (message_id,),
+                    )
+                    if item["transcript"].strip()
+                )
+        assignments: list[str] = []
+        values: list[Any] = []
+        if text is not None:
+            assignments.append("text = ?")
+            values.append(text)
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(status)
+            assignments.append("confirmed_at = ?")
+            values.append(utc_now() if status == "confirmed" else None)
+        assignments.append("updated_at = ?")
+        values.append(utc_now())
+        values.append(message_id)
         result = db.execute(
             f"""
             UPDATE dictation_messages
